@@ -10,6 +10,8 @@ See the Mulan PSL v2 for more details. */
 
 #include "lru_replacer.h"
 
+#include <algorithm>
+
 LRUReplacer::LRUReplacer(size_t num_pages) {
     max_size_ = num_pages;
     std::fill(std::begin(is_pinned_), std::end(is_pinned_), true);
@@ -17,7 +19,7 @@ LRUReplacer::LRUReplacer(size_t num_pages) {
 
 LRUReplacer::LRUReplacer() { std::fill(std::begin(is_pinned_), std::end(is_pinned_), true); }
 
-LRUReplacer::~LRUReplacer() = default;  
+LRUReplacer::~LRUReplacer() = default;
 
 /**
  * @description: 使用LRU策略删除一个victim frame，并返回该frame的id
@@ -70,6 +72,7 @@ void LRUReplacer::pin(frame_id_t frame_id) {
  * @param {frame_id_t} frame_id 取消固定的frame的id
  */
 void LRUReplacer::unpin(frame_id_t frame_id) {
+    std::scoped_lock lock{latch_};
     // Todo:
     //  支持并发锁
     //  选择一个frame取消固定
@@ -84,4 +87,7 @@ void LRUReplacer::unpin(frame_id_t frame_id) {
 /**
  * @description: 获取当前replacer中可以被淘汰的页面数量
  */
-size_t LRUReplacer::Size() { return LRUlist_.size(); }
+size_t LRUReplacer::Size() {
+    std::scoped_lock lock{latch_};
+    return LRUlist_.size();
+}
