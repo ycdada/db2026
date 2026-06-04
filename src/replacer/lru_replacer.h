@@ -29,6 +29,8 @@ class LRUReplacer : public Replacer {
      */
     explicit LRUReplacer(size_t num_pages);
 
+    explicit LRUReplacer();
+
     ~LRUReplacer();
 
     bool victim(frame_id_t *frame_id);

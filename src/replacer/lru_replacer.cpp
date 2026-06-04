@@ -10,7 +10,12 @@ See the Mulan PSL v2 for more details. */
 
 #include "lru_replacer.h"
 
-LRUReplacer::LRUReplacer(size_t num_pages) { max_size_ = num_pages; }
+LRUReplacer::LRUReplacer(size_t num_pages) {
+    max_size_ = num_pages;
+    std::fill(std::begin(is_pinned_), std::end(is_pinned_), true);
+}
+
+LRUReplacer::LRUReplacer() { std::fill(std::begin(is_pinned_), std::end(is_pinned_), true); }
 
 LRUReplacer::~LRUReplacer() = default;  
 
@@ -33,6 +38,7 @@ bool LRUReplacer::victim(frame_id_t* frame_id) {
 
     *frame_id = LRUlist_.back();   // 选择最久未使用的页面(链表尾部)
     is_pinned_[*frame_id] = true;  // 标记为使用
+    LRUhash_.erase(*frame_id);     // 从哈希表中删除
     LRUlist_.pop_back();           // 从链表中删除
 
     return true;
@@ -50,8 +56,12 @@ void LRUReplacer::pin(frame_id_t frame_id) {
     if (is_pinned_[frame_id]) {
         return;  // 如果已经被固定，则不做任何操作
     }
-    is_pinned_[frame_id] = true;         // 标记为已使用
-    LRUlist_.erase(LRUhash_[frame_id]);  // 从链表中删除
+    is_pinned_[frame_id] = true;  // 标记为已使用
+    auto it = LRUhash_.find(frame_id);
+    if (it != LRUhash_.end()) {
+        LRUlist_.erase(it->second);  // 从链表中删除
+        LRUhash_.erase(it);
+    }
 
 }
 
