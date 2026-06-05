@@ -140,10 +140,12 @@ RmPageHandle RmFileHandle::fetch_page_handle(int page_no) const {
 RmPageHandle RmFileHandle::create_new_page_handle() {
     // Todo:
     // 1.使用缓冲池来创建一个新page
-    page_id_t page_no = disk_manager_->allocate_page(fd_);
-    file_hdr_.num_pages++;
-    PageId page_id{fd_, page_no};
+    // new_page会在fd对应的文件中分配新的page_no（从file_hdr_.num_pages开始递增），
+    // 并将分配结果写回page_id，避免与disk_manager的页号分配重复
+    PageId page_id{fd_, INVALID_PAGE_ID};
     Page *page = buffer_pool_manager_->new_page(&page_id);
+    page_id_t page_no = page->get_page_id().page_no;
+    file_hdr_.num_pages++;
     // 2.更新page handle中的相关信息
     RmPageHandle page_handle(&file_hdr_, page);
     page_handle.page_hdr->next_free_page_no = file_hdr_.first_free_page_no;

@@ -102,8 +102,8 @@ Page* BufferPoolManager::fetch_page(PageId page_id) {
     // 页面不在缓冲池中,寻找可用frame
     frame_id_t frame_id;
     if (!find_victim_page(&frame_id)) {
-        throw InternalError("BufferPoolInstance::fetch_page: No available frame found.");
-        // return nullptr;  // 没有可用frame
+        // 所有frame都被pin住，无法获得可用frame
+        return nullptr;
     }
 
     // 获取victim frame对应的页面
@@ -217,9 +217,12 @@ Page* BufferPoolManager::new_page(PageId* page_id) {
     // 找一个可用frame
     frame_id_t frame_id;
     if (!find_victim_page(&frame_id)) {
-        throw InternalError("BufferPoolInstance::new_page: No available frame found.");
-        // return nullptr;
+        // 缓冲池已满且所有页都被pin住，无法创建新页
+        return nullptr;
     }
+
+    // 在fd对应的文件中分配一个新的page_no，并写回调用方
+    page_id->page_no = disk_manager_->allocate_page(page_id->fd);
 
     // 获取frame对应的页面
     Page* page = &pages_[frame_id];

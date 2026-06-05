@@ -48,7 +48,7 @@ make unit_test
 
 ## Architecture Overview
 
-The server (`rmdb.cpp`) starts as a TCP server (port 8765) that spawns a thread per client connection. Each client request passes through the full pipeline:
+The server (`rmdb.cpp`) starts as a TCP server (port 8765, `MAX_CONN_LIMIT = 8`) that spawns a thread per client connection. All manager objects (`DiskManager`, `BufferPoolManager`, `RmManager`, `IxManager`, `SmManager`, `LockManager`, `TransactionManager`, `Planner`, `Optimizer`, `QlManager`, `LogManager`, `RecoveryManager`, `Portal`, `Analyze`) are constructed once as globals in `rmdb.cpp` and shared across connection threads. Each client request passes through the full pipeline:
 
 ```
 SQL text → Parser (flex/bison) → AST → Analyzer → Query
