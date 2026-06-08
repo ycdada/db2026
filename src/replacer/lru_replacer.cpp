@@ -14,13 +14,12 @@ See the Mulan PSL v2 for more details. */
 
 LRUReplacer::LRUReplacer(size_t num_pages) {
     max_size_ = num_pages;
-    std::fill(std::begin(is_pinned_), std::end(is_pinned_), true);
-    pin_flags_.assign(num_pages, true);
+    is_pinned_.assign(max_size_, true);
 }
 
 LRUReplacer::LRUReplacer() {
-    std::fill(std::begin(is_pinned_), std::end(is_pinned_), true);
-    pin_flags_.assign(BUFFER_POOL_SIZE, true);
+    max_size_ = BUFFER_POOL_SIZE;
+    is_pinned_.assign(max_size_, true);
 }
 
 LRUReplacer::~LRUReplacer() = default;
@@ -43,8 +42,7 @@ bool LRUReplacer::victim(frame_id_t* frame_id) {
     }
 
     *frame_id = LRUlist_.back();   // 选择最久未使用的页面(链表尾部)
-    ensure_capacity(*frame_id);
-    pin_flags_[*frame_id] = true;  // 标记为使用
+    is_pinned_[*frame_id] = true;  // 标记为使用
     LRUhash_.erase(*frame_id);     // 从哈希表中删除
     LRUlist_.pop_back();           // 从链表中删除
 
@@ -60,11 +58,10 @@ void LRUReplacer::pin(frame_id_t frame_id) {
     // Todo:
     // 固定指定id的frame
     // 在数据结构中移除该frame
-    ensure_capacity(frame_id);
-    if (pin_flags_[frame_id]) {
+    if (is_pinned_[frame_id]) {
         return;  // 如果已经被固定，则不做任何操作
     }
-    pin_flags_[frame_id] = true;  // 标记为已使用
+    is_pinned_[frame_id] = true;  // 标记为已使用
     auto it = LRUhash_.find(frame_id);
     if (it != LRUhash_.end()) {
         LRUlist_.erase(it->second);  // 从链表中删除
@@ -82,9 +79,8 @@ void LRUReplacer::unpin(frame_id_t frame_id) {
     // Todo:
     //  支持并发锁
     //  选择一个frame取消固定
-    ensure_capacity(frame_id);
-    if (pin_flags_[frame_id]) {
-        pin_flags_[frame_id] = false;           // 标记为未使用
+    if (is_pinned_[frame_id]) {
+        is_pinned_[frame_id] = false;           // 标记为未使用
         LRUlist_.push_front(frame_id);          // 加入链表头部(最近使用)
         LRUhash_[frame_id] = LRUlist_.begin();  // 将frame_id映射到链表头部
     }
