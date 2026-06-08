@@ -13,8 +13,10 @@ See the Mulan PSL v2 for more details. */
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
+#include "execution_common.h"
 #include "index/ix.h"
 #include "system/sm.h"
+#include "record/rm_scan.h"
 
 class SeqScanExecutor : public AbstractExecutor {
    private:
@@ -46,16 +48,43 @@ class SeqScanExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
-        
+        scan_ = std::make_unique<RmScan>(fh_);
+        // 跳过不满足条件的记录
+        while (!scan_->is_end()) {
+            auto rec = fh_->get_record(scan_->rid(), context_);
+            if (eval_conds(rec->data, cols_, fed_conds_)) {
+                rid_ = scan_->rid();
+                return;
+            }
+            scan_->next();
+        }
     }
 
     void nextTuple() override {
-        
+        if (scan_ == nullptr) return;
+        scan_->next();
+        while (!scan_->is_end()) {
+            auto rec = fh_->get_record(scan_->rid(), context_);
+            if (eval_conds(rec->data, cols_, fed_conds_)) {
+                rid_ = scan_->rid();
+                return;
+            }
+            scan_->next();
+        }
+    }
+
+    bool is_end() const override {
+        return scan_ == nullptr || scan_->is_end();
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        return nullptr;
+        if (scan_ == nullptr || scan_->is_end()) return nullptr;
+        return fh_->get_record(rid_, context_);
     }
+
+    const std::vector<ColMeta> &cols() const override { return cols_; }
+
+    size_t tupleLen() const override { return len_; }
 
     Rid &rid() override { return rid_; }
 };

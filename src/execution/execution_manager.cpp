@@ -159,7 +159,7 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     rec_printer.print_separator(context);
     // print header into file
     std::fstream outfile;
-    outfile.open("output.txt", std::ios::out | std::ios::app);
+    outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
     outfile << "|";
     for(int i = 0; i < captions.size(); ++i) {
         outfile << " " << captions[i] << " |";

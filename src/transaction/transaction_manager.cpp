@@ -27,8 +27,18 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
     // 3. 把开始事务加入到全局事务表中
     // 4. 返回当前事务指针
     // 如果需要支持MVCC请在上述过程中添加代码
-    
-    return nullptr;
+    if (txn == nullptr) {
+        // 创建新事务
+        txn_id_t new_txn_id = next_txn_id_++;
+        txn = new Transaction(new_txn_id);
+        txn->set_state(TransactionState::DEFAULT);
+
+        std::unique_lock<std::mutex> lock(latch_);
+        txn_map[new_txn_id] = txn;
+    }
+    // 如果是已有事务，直接复用
+    txn->set_state(TransactionState::GROWING);
+    return txn;
 }
 
 /**
@@ -44,7 +54,17 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     // 4. 把事务日志刷入磁盘中
     // 5. 更新事务状态
     // 如果需要支持MVCC请在上述过程中添加代码
+    if (txn == nullptr) return;
 
+    // 释放所有锁
+    auto lock_set = txn->get_lock_set();
+    for (auto &lock_id : *lock_set) {
+        lock_manager_->unlock(txn, lock_id);
+    }
+    lock_set->clear();
+
+    // 更新事务状态
+    txn->set_state(TransactionState::COMMITTED);
 }
 
 /**
@@ -60,5 +80,15 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     // 4. 把事务日志刷入磁盘中
     // 5. 更新事务状态
     // 如果需要支持MVCC请在上述过程中添加代码
-    
+    if (txn == nullptr) return;
+
+    // 释放所有锁
+    auto lock_set = txn->get_lock_set();
+    for (auto &lock_id : *lock_set) {
+        lock_manager_->unlock(txn, lock_id);
+    }
+    lock_set->clear();
+
+    // 更新事务状态
+    txn->set_state(TransactionState::ABORTED);
 }

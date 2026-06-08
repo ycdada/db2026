@@ -12,6 +12,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
+#include "execution_common.h"
 #include "index/ix.h"
 #include "system/sm.h"
 
@@ -25,8 +26,38 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     std::vector<Condition> fed_conds_;          // join条件
     bool isend;
 
+    // 缓存当前匹配的左、右记录，用于Next()拼接
+    std::unique_ptr<RmRecord> left_rec_;
+    std::unique_ptr<RmRecord> right_rec_;
+
+    // 前进到下一个匹配的左右记录对
+    void advance_to_next_match() {
+        while (!left_->is_end()) {
+            // 在当前左记录下查找匹配的右记录
+            while (!right_->is_end()) {
+                auto cur_right = right_->Next();
+                if (cur_right == nullptr) break;
+                // 构造拼接记录以评估条件
+                auto joined = std::make_unique<RmRecord>(len_);
+                memcpy(joined->data, left_rec_->data, left_->tupleLen());
+                memcpy(joined->data + left_->tupleLen(), cur_right->data, right_->tupleLen());
+                if (eval_conds(joined->data, cols_, fed_conds_)) {
+                    right_rec_ = std::move(cur_right);
+                    return;
+                }
+                right_->nextTuple();
+            }
+            // 右表扫描完毕，前进左表并重启右表
+            left_->nextTuple();
+            if (!left_->is_end()) {
+                left_rec_ = left_->Next();
+                right_->beginTuple();
+            }
+        }
+    }
+
    public:
-    NestedLoopJoinExecutor(std::unique_ptr<AbstractExecutor> left, std::unique_ptr<AbstractExecutor> right, 
+    NestedLoopJoinExecutor(std::unique_ptr<AbstractExecutor> left, std::unique_ptr<AbstractExecutor> right,
                             std::vector<Condition> conds) {
         left_ = std::move(left);
         right_ = std::move(right);
@@ -40,20 +71,37 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         cols_.insert(cols_.end(), right_cols.begin(), right_cols.end());
         isend = false;
         fed_conds_ = std::move(conds);
-
     }
 
     void beginTuple() override {
-
+        left_->beginTuple();
+        if (!left_->is_end()) {
+            left_rec_ = left_->Next();
+            right_->beginTuple();
+            advance_to_next_match();
+        }
+        isend = left_->is_end();
     }
 
     void nextTuple() override {
-        
+        right_->nextTuple();
+        advance_to_next_match();
+        isend = left_->is_end();
     }
 
+    bool is_end() const override { return isend; }
+
     std::unique_ptr<RmRecord> Next() override {
-        return nullptr;
+        // 拼接当前匹配的左、右记录
+        auto rec = std::make_unique<RmRecord>(len_);
+        memcpy(rec->data, left_rec_->data, left_->tupleLen());
+        memcpy(rec->data + left_->tupleLen(), right_rec_->data, right_->tupleLen());
+        return rec;
     }
+
+    const std::vector<ColMeta> &cols() const override { return cols_; }
+
+    size_t tupleLen() const override { return len_; }
 
     Rid &rid() override { return _abstract_rid; }
 };

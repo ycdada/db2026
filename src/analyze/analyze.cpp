@@ -48,8 +48,36 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         get_clause(x->conds, query->conds);
         check_clause(query->tables, query->conds);
     } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(parse)) {
-        /** TODO: */
+        // 处理表名
+        query->tables.push_back(x->tab_name);
 
+        // 获取表的列元数据，用于SET子句的类型检查和转换
+        TabMeta &tab = sm_manager_->db_.get_table(x->tab_name);
+
+        // 处理SET子句
+        for (auto &sv_set_clause : x->set_clauses) {
+            SetClause set_clause;
+            set_clause.lhs.col_name = sv_set_clause->col_name;
+            set_clause.lhs.tab_name = x->tab_name;
+            set_clause.rhs = convert_sv_value(sv_set_clause->val);
+            // 查找列元数据，进行类型转换和init_raw
+            auto col_meta = tab.get_col(sv_set_clause->col_name);
+            if (col_meta == tab.cols.end()) {
+                throw ColumnNotFoundError(sv_set_clause->col_name);
+            }
+            // INT-FLOAT转换
+            if (col_meta->type == TYPE_FLOAT && set_clause.rhs.type == TYPE_INT) {
+                set_clause.rhs.set_float((float)set_clause.rhs.int_val);
+            } else if (col_meta->type == TYPE_INT && set_clause.rhs.type == TYPE_FLOAT) {
+                set_clause.rhs.set_int((int)set_clause.rhs.float_val);
+            }
+            set_clause.rhs.init_raw(col_meta->len);
+            query->set_clauses.push_back(set_clause);
+        }
+
+        // 处理WHERE条件
+        get_clause(x->conds, query->conds);
+        check_clause(query->tables, query->conds);
     } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(parse)) {
         //处理where条件
         get_clause(x->conds, query->conds);
@@ -131,6 +159,12 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
         ColType lhs_type = lhs_col->type;
         ColType rhs_type;
         if (cond.is_rhs_val) {
+            // 类型转换：允许INT/FLOAT之间的比较
+            if (lhs_type == TYPE_FLOAT && cond.rhs_val.type == TYPE_INT) {
+                cond.rhs_val.set_float((float)cond.rhs_val.int_val);
+            } else if (lhs_type == TYPE_INT && cond.rhs_val.type == TYPE_FLOAT) {
+                cond.rhs_val.set_int((int)cond.rhs_val.float_val);
+            }
             cond.rhs_val.init_raw(lhs_col->len);
             rhs_type = cond.rhs_val.type;
         } else {

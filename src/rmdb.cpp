@@ -148,7 +148,7 @@ void *client_handler(void *sock_fd) {
                     std::cout << e.GetInfo() << std::endl;
 
                     std::fstream outfile;
-                    outfile.open("output.txt", std::ios::out | std::ios::app);
+                    outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
                     outfile << str;
                     outfile.close();
                 } catch (RMDBError &e) {
@@ -162,7 +162,7 @@ void *client_handler(void *sock_fd) {
 
                     // 将报错信息写入output.txt
                     std::fstream outfile;
-                    outfile.open("output.txt",std::ios::out | std::ios::app);
+                    outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
                     outfile << "failure\n";
                     outfile.close();
                 }

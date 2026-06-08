@@ -48,6 +48,8 @@ void SmManager::create_db(const std::string& db_name) {
     //创建系统目录
     DbMeta *new_db = new DbMeta();
     new_db->name_ = db_name;
+    // 将元数据同时加载到内存中的 db_ 对象
+    db_.name() = db_name;
 
     // 注意，此处ofstream会在当前目录创建(如果没有此文件先创建)和打开一个名为DB_META_NAME的文件
     std::ofstream ofs(DB_META_NAME);
@@ -85,7 +87,21 @@ void SmManager::drop_db(const std::string& db_name) {
  * @param {string&} db_name 数据库名称，与文件夹同名
  */
 void SmManager::open_db(const std::string& db_name) {
-    
+    // 加载数据库元数据到内存
+    db_.name() = db_name;
+    // 进入数据库目录读取元数据文件
+    if (chdir(db_name.c_str()) < 0) {
+        throw UnixError();
+    }
+    std::ifstream ifs(DB_META_NAME);
+    if (ifs.is_open()) {
+        ifs >> db_;
+    }
+    ifs.close();
+    // 回到上级目录
+    if (chdir("..") < 0) {
+        throw UnixError();
+    }
 }
 
 /**
@@ -93,7 +109,7 @@ void SmManager::open_db(const std::string& db_name) {
  */
 void SmManager::flush_meta() {
     // 默认清空文件
-    std::ofstream ofs(DB_META_NAME);
+    std::ofstream ofs(db_.name() + "/" + DB_META_NAME);
     ofs << db_;
 }
 
@@ -110,7 +126,7 @@ void SmManager::close_db() {
  */
 void SmManager::show_tables(Context* context) {
     std::fstream outfile;
-    outfile.open("output.txt", std::ios::out | std::ios::app);
+    outfile.open(db_.name() + "/output.txt", std::ios::out | std::ios::app);
     outfile << "| Tables |\n";
     RecordPrinter printer(1);
     printer.print_separator(context);
@@ -174,10 +190,11 @@ void SmManager::create_table(const std::string& tab_name, const std::vector<ColD
     }
     // Create & open record file
     int record_size = curr_offset;  // record_size就是col meta所占的大小（表的元数据也是以记录的形式进行存储的）
-    rm_manager_->create_file(tab_name, record_size);
+    std::string file_path = db_.name() + "/" + tab_name;
+    rm_manager_->create_file(file_path, record_size);
     db_.tabs_[tab_name] = tab;
     // fhs_[tab_name] = rm_manager_->open_file(tab_name);
-    fhs_.emplace(tab_name, rm_manager_->open_file(tab_name));
+    fhs_.emplace(tab_name, rm_manager_->open_file(file_path));
 
     flush_meta();
 }
@@ -188,7 +205,35 @@ void SmManager::create_table(const std::string& tab_name, const std::vector<ColD
  * @param {Context*} context
  */
 void SmManager::drop_table(const std::string& tab_name, Context* context) {
-    
+    if (!db_.is_table(tab_name)) {
+        throw TableNotFoundError(tab_name);
+    }
+    std::string file_path = db_.name() + "/" + tab_name;
+    // 关闭并删除表的数据文件
+    auto it_fh = fhs_.find(tab_name);
+    if (it_fh != fhs_.end()) {
+        buffer_pool_manager_->flush_all_pages(it_fh->second->GetFd());
+        disk_manager_->close_file(it_fh->second->GetFd());
+        fhs_.erase(it_fh);
+    }
+    disk_manager_->destroy_file(file_path);
+    // 清理索引
+    TabMeta &tab = db_.get_table(tab_name);
+    for (auto &index : tab.indexes) {
+        std::string ix_name = ix_manager_->get_index_name(tab_name, index.cols);
+        std::string ix_path = db_.name() + "/" + ix_name;
+        auto it_ih = ihs_.find(ix_name);
+        if (it_ih != ihs_.end()) {
+            int ix_fd = disk_manager_->get_file_fd(ix_path);
+            buffer_pool_manager_->flush_all_pages(ix_fd);
+            disk_manager_->close_file(ix_fd);
+            ihs_.erase(it_ih);
+        }
+        disk_manager_->destroy_file(ix_path);
+    }
+    // 从元数据中删除表
+    db_.tabs_.erase(tab_name);
+    flush_meta();
 }
 
 /**

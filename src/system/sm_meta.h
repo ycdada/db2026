@@ -164,6 +164,7 @@ class DbMeta {
     std::map<std::string, TabMeta> tabs_;   // 数据库中包含的表
 
    public:
+    std::string &name() { return name_; }   // 数据库名称的访问器
     // DbMeta(std::string name) : name_(name) {}
 
     /* 判断数据库中是否存在指定名称的表 */
