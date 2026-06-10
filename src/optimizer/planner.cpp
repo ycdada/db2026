@@ -394,21 +394,30 @@ std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> quer
     std::vector<std::string> tables = query->tables;
     std::vector<Condition> conds = query->conds;  // 拷贝，下面会消耗
 
-    // 1) 为每张表构建：Scan(空谓词) -> 可选 Filter -> 可选 Project(投影下推)
+    // 1) 谓词下推：先把每张表的单表条件全部取出，剩下的 conds 即为跨表连接条件。
+    //    必须先全部取出，否则投影下推时仍会把别的表尚未处理的单表谓词列误并入投影。
     struct Leaf { std::shared_ptr<Plan> plan; std::string tab; size_t card; };
     std::vector<Leaf> leaves;
     bool multi = tables.size() > 1;
 
+    std::map<std::string, std::vector<Condition>> single_conds;
     for (auto &tab : tables) {
-        // 谓词下推：取出该表的单表条件
-        auto single = explain_pop_single_conds(conds, tab);
+        single_conds[tab] = explain_pop_single_conds(conds, tab);
+    }
+    // 此时 conds 仅剩连接条件，用于决定投影下推应保留哪些列
+    std::vector<Condition> &join_conds = conds;
+
+    // 2) 为每张表构建：Scan(空谓词) -> 可选 Filter -> 可选 Project(投影下推)
+    for (auto &tab : tables) {
         // 空谓词扫描（rows = 扫描到的全部行）
         std::shared_ptr<Plan> leaf =
             std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tab, std::vector<Condition>(), std::vector<std::string>());
+        auto &single = single_conds[tab];
         if (!single.empty()) {
             leaf = std::make_shared<FilterPlan>(std::move(leaf), single);
         }
-        // 投影下推：仅在多表连接且非 SELECT * 时进行
+        // 投影下推：仅在多表连接且非 SELECT * 时进行。
+        // 保留的列 = select 列 + 连接条件列；单表过滤谓词的列在 Filter 中已消费，无需投影。
         if (multi && !query->is_star) {
             std::vector<TabCol> need;
             auto add_col = [&](const TabCol &c) {
@@ -417,28 +426,60 @@ std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> quer
                 need.push_back(c);
             };
             for (auto &c : query->cols) add_col(c);            // select 需要的列
-            for (auto &c : query->conds) {                     // 连接条件需要的列
+            for (auto &c : join_conds) {                       // 连接条件需要的列
                 add_col(c.lhs_col);
                 if (!c.is_rhs_val) add_col(c.rhs_col);
             }
-            if (!need.empty()) {
+            // 与参考实现一致：仅当投影确实减少了列数时才插入 Project 节点；
+            // 若需要的列覆盖了该表全部列，则不下推投影。
+            size_t tab_col_num = sm_manager_->db_.get_table(tab).cols.size();
+            if (!need.empty() && need.size() != tab_col_num) {
                 leaf = std::make_shared<ProjectionPlan>(T_Projection, std::move(leaf), need);
             }
         }
         leaves.push_back({std::move(leaf), tab, get_table_cardinality(tab)});
     }
 
-    // 2) 基于基数升序排序（最小表作最左外表）
+    // 3) 基于基数升序排序（最小表作最左外表）
     std::stable_sort(leaves.begin(), leaves.end(),
                      [](const Leaf &a, const Leaf &b) { return a.card < b.card; });
 
-    // 3) 折叠为左深连接树，按需附加连接条件
+    // 3) 折叠为左深连接树（连接顺序优化）
+    // 贪心：从基数最小的表出发，每一步在剩余表中优先挑选“能与已连接集合通过连接条件相连”的最小基数表，
+    // 避免凭空产生笛卡尔积（如 a、b 都只与 c 相连时，不能先把 a、b 直接连成空条件的 Join）。
+    // 仅当没有任何可连接表时，才退而连接剩余最小基数的表。
+    std::vector<bool> used(leaves.size(), false);
     std::shared_ptr<Plan> root = leaves.empty() ? nullptr : leaves[0].plan;
     std::vector<std::string> joined;
-    if (!leaves.empty()) joined.push_back(leaves[0].tab);
-    for (size_t i = 1; i < leaves.size(); i++) {
+    if (!leaves.empty()) { joined.push_back(leaves[0].tab); used[0] = true; }
+
+    // 判断候选表是否能与当前已连接集合直接相连
+    auto can_join = [&](const std::string &cand) {
+        for (auto &c : conds) {
+            if (c.is_rhs_val) continue;
+            bool lhs_cand = c.lhs_col.tab_name == cand;
+            bool rhs_cand = c.rhs_col.tab_name == cand;
+            bool lhs_in = std::find(joined.begin(), joined.end(), c.lhs_col.tab_name) != joined.end();
+            bool rhs_in = std::find(joined.begin(), joined.end(), c.rhs_col.tab_name) != joined.end();
+            if ((lhs_cand && rhs_in) || (rhs_cand && lhs_in)) return true;
+        }
+        return false;
+    };
+
+    for (size_t step = 1; step < leaves.size(); step++) {
+        // leaves 已按基数升序排列，正序扫描即为“最小基数优先”
+        int pick = -1;
+        for (size_t i = 0; i < leaves.size(); i++) {
+            if (!used[i] && can_join(leaves[i].tab)) { pick = (int)i; break; }
+        }
+        if (pick < 0) {  // 无可连接表，退而取剩余最小基数表（产生笛卡尔积）
+            for (size_t i = 0; i < leaves.size(); i++) {
+                if (!used[i]) { pick = (int)i; break; }
+            }
+        }
+        used[pick] = true;
         std::vector<std::string> next_tabs = joined;
-        next_tabs.push_back(leaves[i].tab);
+        next_tabs.push_back(leaves[pick].tab);
         // 选出此次连接可用的条件（两侧表都已就绪）
         std::vector<Condition> jc;
         auto it = conds.begin();
@@ -450,8 +491,8 @@ std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> quer
                 ++it;
             }
         }
-        root = std::make_shared<JoinPlan>(T_NestLoop, std::move(root), leaves[i].plan, jc);
-        joined.push_back(leaves[i].tab);
+        root = std::make_shared<JoinPlan>(T_NestLoop, std::move(root), leaves[pick].plan, jc);
+        joined.push_back(leaves[pick].tab);
     }
 
     // 4) 顶层投影（select 语句根一定是 Project）
