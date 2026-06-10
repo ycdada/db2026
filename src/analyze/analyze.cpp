@@ -80,14 +80,7 @@ static std::string literal_to_raw(const std::shared_ptr<ast::Value> &sv_val) {
     if (auto int_lit = std::dynamic_pointer_cast<ast::IntLit>(sv_val)) {
         return std::to_string(int_lit->val);
     } else if (auto float_lit = std::dynamic_pointer_cast<ast::FloatLit>(sv_val)) {
-        std::string s = std::to_string(float_lit->val);
-        // 去掉末尾多余的 0 与小数点，使其更接近原始书写形式
-        if (s.find('.') != std::string::npos) {
-            size_t last = s.find_last_not_of('0');
-            if (s[last] == '.') last--;
-            s = s.substr(0, last + 1);
-        }
-        return s;
+        return std::to_string(float_lit->val);
     } else if (auto str_lit = std::dynamic_pointer_cast<ast::StringLit>(sv_val)) {
         return "'" + str_lit->val + "'";
     }
