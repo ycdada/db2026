@@ -130,6 +130,16 @@ int push_conds(Condition *cond, std::shared_ptr<Plan> plan)
         x->conds_.emplace_back(std::move(*cond));
         return 3;
     }
+    else if(auto x = std::dynamic_pointer_cast<FilterPlan>(plan))
+    {
+        // 题目四：透传到子节点
+        return push_conds(cond, x->subplan_);
+    }
+    else if(auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan))
+    {
+        // 题目四：透传到子节点
+        return push_conds(cond, x->subplan_);
+    }
     return false;
 }
 
@@ -351,15 +361,24 @@ size_t Planner::get_table_cardinality(const std::string &tab_name) {
     return cnt;
 }
 
-// 取出属于单表的谓词（左列属于该表且右值为常量，或左右列同属一表）
+// 取出属于单表的谓词（左列属于该表且右值为常量，或左右列同属一表同别名）
+// 关键：对于 col1 = col2 形式，若两列分属不同别名（自连接），视为跨表连接条件不予提取。
 static std::vector<Condition> explain_pop_single_conds(std::vector<Condition> &conds, const std::string &tab) {
     std::vector<Condition> solved;
     auto it = conds.begin();
     while (it != conds.end()) {
-        if ((it->lhs_col.tab_name == tab && it->is_rhs_val) ||
-            (!it->is_rhs_val && it->lhs_col.tab_name == tab && it->rhs_col.tab_name == tab)) {
+        if (it->lhs_col.tab_name == tab && it->is_rhs_val) {
+            // 单表常量过滤：左列属于当前表
             solved.emplace_back(std::move(*it));
             it = conds.erase(it);
+        } else if (!it->is_rhs_val && it->lhs_col.tab_name == tab && it->rhs_col.tab_name == tab) {
+            // 左右列都属同一物理表：检查别名，避免把自连接条件误认为单表条件
+            if (it->lhs_col.tab_alias == it->rhs_col.tab_alias) {
+                solved.emplace_back(std::move(*it));
+                it = conds.erase(it);
+            } else {
+                ++it;  // 自连接条件（别名不同），留在 conds 中作为连接条件
+            }
         } else {
             ++it;
         }
@@ -381,13 +400,16 @@ static void explain_collect_tables(const std::shared_ptr<Plan> &plan, std::vecto
     }
 }
 
-// 判断条件涉及的表是否都已包含在给定表集合中
-static bool conds_tables_covered(const Condition &c, const std::vector<std::string> &tabs) {
-    auto has = [&](const std::string &t) {
-        return std::find(tabs.begin(), tabs.end(), t) != tabs.end();
-    };
-    if (c.is_rhs_val) return has(c.lhs_col.tab_name);
-    return has(c.lhs_col.tab_name) && has(c.rhs_col.tab_name);
+// 判断连接条件在此次连接中是否可用：一侧在已连接集合，另一侧恰为当前新加入的表
+// 匹配参考实现 join_tables 中的严格条件：(left_in_joined && right_in_current) || (right_in_joined && left_in_current)
+static bool cond_applicable(const Condition &c, const std::vector<std::string> &joined,
+                            const std::string &current) {
+    if (c.is_rhs_val) return false;  // 单表条件不应残留在此
+    bool lhs_in = std::find(joined.begin(), joined.end(), c.lhs_col.tab_name) != joined.end();
+    bool rhs_in = std::find(joined.begin(), joined.end(), c.rhs_col.tab_name) != joined.end();
+    bool lhs_cur = c.lhs_col.tab_name == current;
+    bool rhs_cur = c.rhs_col.tab_name == current;
+    return (lhs_in && rhs_cur) || (rhs_in && lhs_cur);
 }
 
 std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> query, Context *context) {
@@ -400,8 +422,13 @@ std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> quer
     std::vector<Leaf> leaves;
     bool multi = tables.size() > 1;
 
+    // 对 tables 去重后提取单表条件，避免自连接场景下同名表覆盖 single_conds 导致条件丢失
+    std::vector<std::string> unique_tabs = tables;
+    std::sort(unique_tabs.begin(), unique_tabs.end());
+    unique_tabs.erase(std::unique(unique_tabs.begin(), unique_tabs.end()), unique_tabs.end());
+
     std::map<std::string, std::vector<Condition>> single_conds;
-    for (auto &tab : tables) {
+    for (auto &tab : unique_tabs) {
         single_conds[tab] = explain_pop_single_conds(conds, tab);
     }
     // 此时 conds 仅剩连接条件，用于决定投影下推应保留哪些列
@@ -478,13 +505,12 @@ std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> quer
             }
         }
         used[pick] = true;
-        std::vector<std::string> next_tabs = joined;
-        next_tabs.push_back(leaves[pick].tab);
-        // 选出此次连接可用的条件（两侧表都已就绪）
+        std::string current_tab = leaves[pick].tab;
+        // 选出此次连接可用的条件（一侧在已连接集合，另一侧恰为当前表）
         std::vector<Condition> jc;
         auto it = conds.begin();
         while (it != conds.end()) {
-            if (conds_tables_covered(*it, next_tabs)) {
+            if (cond_applicable(*it, joined, current_tab)) {
                 jc.push_back(*it);
                 it = conds.erase(it);
             } else {
@@ -492,7 +518,15 @@ std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> quer
             }
         }
         root = std::make_shared<JoinPlan>(T_NestLoop, std::move(root), leaves[pick].plan, jc);
-        joined.push_back(leaves[pick].tab);
+        joined.push_back(current_tab);
+    }
+
+    // 3.5) 处理剩余的连接条件（防御性处理，正常连通图不应有残留）
+    if (!conds.empty()) {
+        for (auto &c : conds) {
+            push_conds(&c, root);
+        }
+        conds.clear();
     }
 
     // 4) 顶层投影（select 语句根一定是 Project）
