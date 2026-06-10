@@ -22,6 +22,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_update.h"
 #include "execution/executor_insert.h"
 #include "execution/executor_delete.h"
+#include "execution/executor_filter.h"
 #include "execution/execution_sort.h"
 #include "common/common.h"
 
@@ -30,7 +31,8 @@ typedef enum portalTag{
     PORTAL_ONE_SELECT,
     PORTAL_DML_WITHOUT_SELECT,
     PORTAL_MULTI_QUERY,
-    PORTAL_CMD_UTILITY
+    PORTAL_CMD_UTILITY,
+    PORTAL_EXPLAIN          // 题目四：EXPLAIN ANALYZE
 } portalTag;
 
 
@@ -103,8 +105,16 @@ class Portal
                 {
                     std::unique_ptr<AbstractExecutor> root =
                             std::make_unique<InsertExecutor>(sm_manager_, x->tab_name_, x->values_, context);
-            
+
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
+                }
+
+                case T_explain:
+                {
+                    // 题目四：EXPLAIN ANALYZE，构建执行器树后走 PORTAL_EXPLAIN
+                    std::shared_ptr<ProjectionPlan> p = std::dynamic_pointer_cast<ProjectionPlan>(x->subplan_);
+                    std::unique_ptr<AbstractExecutor> root = convert_plan_executor(p, context);
+                    return std::make_shared<PortalStmt>(PORTAL_EXPLAIN, std::vector<TabCol>(), std::move(root), plan);
                 }
 
 
@@ -142,6 +152,12 @@ class Portal
                 ql->run_cmd_utility(portal->plan, txn_id, context);
                 break;
             }
+            case PORTAL_EXPLAIN:
+            {
+                // 题目四：执行计划树并输出运行时统计
+                ql->run_explain(std::move(portal->root), context);
+                break;
+            }
             default:
             {
                 throw InternalError("Unexpected field type");
@@ -156,8 +172,11 @@ class Portal
     std::unique_ptr<AbstractExecutor> convert_plan_executor(std::shared_ptr<Plan> plan, Context *context)
     {
         if(auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)){
-            return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context), 
-                                                        x->sel_cols_);
+            return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context),
+                                                        x->sel_cols_, x->is_star_);
+        } else if(auto x = std::dynamic_pointer_cast<FilterPlan>(plan)) {
+            // 题目四：过滤节点
+            return std::make_unique<FilterExecutor>(convert_plan_executor(x->subplan_, context), x->conds_);
         } else if(auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
             if(x->tag == T_SeqScan) {
                 return std::make_unique<SeqScanExecutor>(sm_manager_, x->tab_name_, x->conds_, context);

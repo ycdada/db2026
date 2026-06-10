@@ -220,13 +220,29 @@ struct JoinExpr : public TreeNode {
             left(std::move(left_)), right(std::move(right_)), conds(std::move(conds_)), type(type_) {}
 };
 
+// 题目四：表引用，支持可选的表别名（FROM customers c）
+struct TableRef : public TreeNode {
+    std::string tab_name;   // 真实表名
+    std::string alias;      // 表别名，没有则为空串
+
+    TableRef(std::string tab_name_, std::string alias_ = "") :
+            tab_name(std::move(tab_name_)), alias(std::move(alias_)) {}
+};
+
+// 题目四：FROM 子句，收集表引用以及 JOIN ... ON 产生的连接条件
+struct FromClause : public TreeNode {
+    std::vector<std::shared_ptr<TableRef>> refs;       // 表引用列表（含别名）
+    std::vector<std::shared_ptr<BinaryExpr>> conds;    // JOIN ON 收集到的连接条件
+};
+
 struct SelectStmt : public TreeNode {
     std::vector<std::shared_ptr<Col>> cols;
     std::vector<std::string> tabs;
+    std::vector<std::string> tab_alias;   // 题目四：与 tabs 平行的别名列表，无别名为空串
     std::vector<std::shared_ptr<BinaryExpr>> conds;
     std::vector<std::shared_ptr<JoinExpr>> jointree;
 
-    
+
     bool has_sort;
     std::shared_ptr<OrderBy> order;
 
@@ -235,10 +251,17 @@ struct SelectStmt : public TreeNode {
                std::vector<std::string> tabs_,
                std::vector<std::shared_ptr<BinaryExpr>> conds_,
                std::shared_ptr<OrderBy> order_) :
-            cols(std::move(cols_)), tabs(std::move(tabs_)), conds(std::move(conds_)), 
+            cols(std::move(cols_)), tabs(std::move(tabs_)), conds(std::move(conds_)),
             order(std::move(order_)) {
                 has_sort = (bool)order;
             }
+};
+
+// 题目四：EXPLAIN ANALYZE 语句，包裹内层的 SELECT 语句
+struct ExplainStmt : public TreeNode {
+    std::shared_ptr<SelectStmt> sel;
+
+    ExplainStmt(std::shared_ptr<SelectStmt> sel_) : sel(std::move(sel_)) {}
 };
 
 // set enable_nestloop
@@ -285,6 +308,10 @@ struct SemValue {
     std::shared_ptr<OrderBy> sv_orderby;
 
     SetKnobType sv_setKnobType;
+
+    // 题目四：表引用（含别名）与 FROM 子句
+    std::shared_ptr<TableRef> sv_table_ref;
+    std::shared_ptr<FromClause> sv_from_clause;
 };
 
 extern std::shared_ptr<ast::TreeNode> parse_tree;

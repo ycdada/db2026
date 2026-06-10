@@ -9,6 +9,8 @@ MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
 #pragma once
+#include <algorithm>
+#include <string>
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
@@ -96,6 +98,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         auto rec = std::make_unique<RmRecord>(len_);
         memcpy(rec->data, left_rec_->data, left_->tupleLen());
         memcpy(rec->data + left_->tupleLen(), right_rec_->data, right_->tupleLen());
+        rows_++;  // 题目四：统计连接输出行数
         return rec;
     }
 
@@ -104,4 +107,37 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     size_t tupleLen() const override { return len_; }
 
     Rid &rid() override { return _abstract_rid; }
+
+    // 题目四：收集子树覆盖的真实表名
+    void collect_tables(std::vector<std::string> &out) override {
+        left_->collect_tables(out);
+        right_->collect_tables(out);
+    }
+
+    // 题目四：输出 Join 节点；先打印左（外表）子树，再打印右（内表）子树
+    void explain_print(int depth, std::string &out) override {
+        std::vector<std::string> tabs;
+        collect_tables(tabs);
+        std::sort(tabs.begin(), tabs.end());
+        tabs.erase(std::unique(tabs.begin(), tabs.end()), tabs.end());
+
+        std::vector<Condition> sc = fed_conds_;
+        std::sort(sc.begin(), sc.end(),
+                  [](const Condition &a, const Condition &b) { return a.to_string() < b.to_string(); });
+
+        out += std::string(depth, '\t');
+        out += "Join(tables=[";
+        for (size_t i = 0; i < tabs.size(); i++) {
+            if (i) out += ", ";
+            out += tabs[i];
+        }
+        out += "], condition=[";
+        for (size_t i = 0; i < sc.size(); i++) {
+            if (i) out += ", ";
+            out += sc[i].to_string();
+        }
+        out += "], rows=" + std::to_string(rows_) + ")\n";
+        left_->explain_print(depth + 1, out);
+        right_->explain_print(depth + 1, out);
+    }
 };

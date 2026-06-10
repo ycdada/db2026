@@ -50,8 +50,12 @@ class Planner {
     std::shared_ptr<Plan> make_one_rel(std::shared_ptr<Query> query);
 
     std::shared_ptr<Plan> generate_sort_plan(std::shared_ptr<Query> query, std::shared_ptr<Plan> plan);
-    
+
     std::shared_ptr<Plan> generate_select_plan(std::shared_ptr<Query> query, Context *context);
+
+    // 题目四：构建用于 EXPLAIN ANALYZE 的优化计划树（谓词下推 + 投影下推 + 基于基数的连接顺序）
+    std::shared_ptr<Plan> generate_explain_plan(std::shared_ptr<Query> query, Context *context);
+    size_t get_table_cardinality(const std::string &tab_name);
 
 
     // int get_indexNo(std::string tab_name, std::vector<Condition> curr_conds);

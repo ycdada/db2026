@@ -20,6 +20,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_seq_scan.h"
 #include "execution/executor_update.h"
 #include "index/ix.h"
+#include "record/rm_scan.h"
 #include "record_printer.h"
 
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string>& index_col_names) {
@@ -330,11 +331,134 @@ std::shared_ptr<Plan> Planner::generate_select_plan(std::shared_ptr<Query> query
     //物理优化
     auto sel_cols = query->cols;
     std::shared_ptr<Plan> plannerRoot = physical_optimization(query, context);
-    plannerRoot = std::make_shared<ProjectionPlan>(T_Projection, std::move(plannerRoot), 
+    plannerRoot = std::make_shared<ProjectionPlan>(T_Projection, std::move(plannerRoot),
                                                         std::move(sel_cols));
 
     return plannerRoot;
 }
+
+// ============== 题目四：EXPLAIN ANALYZE 计划构建 ==============
+
+// 统计表的基数（行数），用于连接顺序优化：扫描一遍 RmFileHandle 计数
+size_t Planner::get_table_cardinality(const std::string &tab_name) {
+    auto fh = sm_manager_->fhs_.at(tab_name).get();
+    size_t cnt = 0;
+    RmScan scan(fh);
+    while (!scan.is_end()) {
+        cnt++;
+        scan.next();
+    }
+    return cnt;
+}
+
+// 取出属于单表的谓词（左列属于该表且右值为常量，或左右列同属一表）
+static std::vector<Condition> explain_pop_single_conds(std::vector<Condition> &conds, const std::string &tab) {
+    std::vector<Condition> solved;
+    auto it = conds.begin();
+    while (it != conds.end()) {
+        if ((it->lhs_col.tab_name == tab && it->is_rhs_val) ||
+            (!it->is_rhs_val && it->lhs_col.tab_name == tab && it->rhs_col.tab_name == tab)) {
+            solved.emplace_back(std::move(*it));
+            it = conds.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return solved;
+}
+
+// 收集一棵计划子树覆盖的所有真实表名
+static void explain_collect_tables(const std::shared_ptr<Plan> &plan, std::vector<std::string> &out) {
+    if (auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
+        out.push_back(x->tab_name_);
+    } else if (auto x = std::dynamic_pointer_cast<FilterPlan>(plan)) {
+        explain_collect_tables(x->subplan_, out);
+    } else if (auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
+        explain_collect_tables(x->subplan_, out);
+    } else if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
+        explain_collect_tables(x->left_, out);
+        explain_collect_tables(x->right_, out);
+    }
+}
+
+// 判断条件涉及的表是否都已包含在给定表集合中
+static bool conds_tables_covered(const Condition &c, const std::vector<std::string> &tabs) {
+    auto has = [&](const std::string &t) {
+        return std::find(tabs.begin(), tabs.end(), t) != tabs.end();
+    };
+    if (c.is_rhs_val) return has(c.lhs_col.tab_name);
+    return has(c.lhs_col.tab_name) && has(c.rhs_col.tab_name);
+}
+
+std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> query, Context *context) {
+    std::vector<std::string> tables = query->tables;
+    std::vector<Condition> conds = query->conds;  // 拷贝，下面会消耗
+
+    // 1) 为每张表构建：Scan(空谓词) -> 可选 Filter -> 可选 Project(投影下推)
+    struct Leaf { std::shared_ptr<Plan> plan; std::string tab; size_t card; };
+    std::vector<Leaf> leaves;
+    bool multi = tables.size() > 1;
+
+    for (auto &tab : tables) {
+        // 谓词下推：取出该表的单表条件
+        auto single = explain_pop_single_conds(conds, tab);
+        // 空谓词扫描（rows = 扫描到的全部行）
+        std::shared_ptr<Plan> leaf =
+            std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tab, std::vector<Condition>(), std::vector<std::string>());
+        if (!single.empty()) {
+            leaf = std::make_shared<FilterPlan>(std::move(leaf), single);
+        }
+        // 投影下推：仅在多表连接且非 SELECT * 时进行
+        if (multi && !query->is_star) {
+            std::vector<TabCol> need;
+            auto add_col = [&](const TabCol &c) {
+                if (c.tab_name != tab) return;
+                for (auto &n : need) if (n.col_name == c.col_name) return;
+                need.push_back(c);
+            };
+            for (auto &c : query->cols) add_col(c);            // select 需要的列
+            for (auto &c : query->conds) {                     // 连接条件需要的列
+                add_col(c.lhs_col);
+                if (!c.is_rhs_val) add_col(c.rhs_col);
+            }
+            if (!need.empty()) {
+                leaf = std::make_shared<ProjectionPlan>(T_Projection, std::move(leaf), need);
+            }
+        }
+        leaves.push_back({std::move(leaf), tab, get_table_cardinality(tab)});
+    }
+
+    // 2) 基于基数升序排序（最小表作最左外表）
+    std::stable_sort(leaves.begin(), leaves.end(),
+                     [](const Leaf &a, const Leaf &b) { return a.card < b.card; });
+
+    // 3) 折叠为左深连接树，按需附加连接条件
+    std::shared_ptr<Plan> root = leaves.empty() ? nullptr : leaves[0].plan;
+    std::vector<std::string> joined;
+    if (!leaves.empty()) joined.push_back(leaves[0].tab);
+    for (size_t i = 1; i < leaves.size(); i++) {
+        std::vector<std::string> next_tabs = joined;
+        next_tabs.push_back(leaves[i].tab);
+        // 选出此次连接可用的条件（两侧表都已就绪）
+        std::vector<Condition> jc;
+        auto it = conds.begin();
+        while (it != conds.end()) {
+            if (conds_tables_covered(*it, next_tabs)) {
+                jc.push_back(*it);
+                it = conds.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        root = std::make_shared<JoinPlan>(T_NestLoop, std::move(root), leaves[i].plan, jc);
+        joined.push_back(leaves[i].tab);
+    }
+
+    // 4) 顶层投影（select 语句根一定是 Project）
+    return std::make_shared<ProjectionPlan>(T_Projection, std::move(root), query->cols, query->is_star);
+}
+
+
 
 // 生成DDL语句和DML语句的查询执行计划
 std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context *context)
@@ -410,10 +534,17 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
     } else if (auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse)) {
 
         std::shared_ptr<plannerInfo> root = std::make_shared<plannerInfo>(x);
-        // 生成select语句的查询执行计划
-        std::shared_ptr<Plan> projection = generate_select_plan(std::move(query), context);
-        plannerRoot = std::make_shared<DMLPlan>(T_select, projection, std::string(), std::vector<Value>(),
+        // 题目四：EXPLAIN ANALYZE 走独立的计划构建（谓词/投影下推 + 基数连接顺序）
+        if (query->explain) {
+            std::shared_ptr<Plan> projection = generate_explain_plan(query, context);
+            plannerRoot = std::make_shared<DMLPlan>(T_explain, projection, std::string(), std::vector<Value>(),
                                                     std::vector<Condition>(), std::vector<SetClause>());
+        } else {
+            // 生成select语句的查询执行计划
+            std::shared_ptr<Plan> projection = generate_select_plan(std::move(query), context);
+            plannerRoot = std::make_shared<DMLPlan>(T_select, projection, std::string(), std::vector<Value>(),
+                                                        std::vector<Condition>(), std::vector<SetClause>());
+        }
     } else {
         throw InternalError("Unexpected AST root");
     }

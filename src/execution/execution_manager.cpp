@@ -211,3 +211,24 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
 void QlManager::run_dml(std::unique_ptr<AbstractExecutor> exec){
     exec->Next();
 }
+
+// 题目四：执行 EXPLAIN ANALYZE 计划树，统计各节点运行时行数后输出计划树（不输出结果集）
+void QlManager::run_explain(std::unique_ptr<AbstractExecutor> executorTreeRoot, Context *context) {
+    // 完整执行计划，累计各节点 rows_
+    for (executorTreeRoot->beginTuple(); !executorTreeRoot->is_end(); executorTreeRoot->nextTuple()) {
+        executorTreeRoot->Next();
+    }
+    // 生成计划树文本
+    std::string out;
+    executorTreeRoot->explain_print(0, out);
+
+    // 输出到客户端缓冲区
+    memcpy(context->data_send_ + *(context->offset_), out.c_str(), out.length());
+    *(context->offset_) += out.length();
+
+    // 输出到 output.txt（追加）
+    std::fstream outfile;
+    outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+    outfile << out;
+    outfile.close();
+}

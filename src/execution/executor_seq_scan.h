@@ -79,6 +79,7 @@ class SeqScanExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         if (scan_ == nullptr || scan_->is_end()) return nullptr;
+        rows_++;  // 题目四：统计扫描到的行数
         return fh_->get_record(rid_, context_);
     }
 
@@ -87,4 +88,13 @@ class SeqScanExecutor : public AbstractExecutor {
     size_t tupleLen() const override { return len_; }
 
     Rid &rid() override { return rid_; }
+
+    // 题目四：输出 Scan 节点
+    void explain_print(int depth, std::string &out) override {
+        out += std::string(depth, '\t');
+        out += "Scan(table=" + tab_name_ + ", type=SeqScan, rows=" + std::to_string(rows_) + ")\n";
+    }
+
+    // 题目四：叶子节点贡献自身表名
+    void collect_tables(std::vector<std::string> &out) override { out.push_back(tab_name_); }
 };

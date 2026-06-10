@@ -21,6 +21,9 @@ class AbstractExecutor {
 
     Context *context_;
 
+    // 题目四：运行时行数统计（EXPLAIN ANALYZE 使用），普通执行路径不读取
+    size_t rows_ = 0;
+
     virtual ~AbstractExecutor() = default;
 
     virtual size_t tupleLen() const { return 0; };
@@ -31,6 +34,12 @@ class AbstractExecutor {
     };
 
     virtual std::string getType() { return "AbstractExecutor"; };
+
+    // 题目四：输出 EXPLAIN 计划树到 out（depth 为缩进层数），默认空实现
+    virtual void explain_print(int depth, std::string &out) {}
+
+    // 题目四：收集本子树覆盖的真实表名（供 Join 节点输出 tables 列表）
+    virtual void collect_tables(std::vector<std::string> &out) {}
 
     virtual void beginTuple(){};
 

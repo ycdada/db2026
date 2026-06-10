@@ -43,7 +43,9 @@ typedef enum PlanTag{
     T_NestLoop,
     T_SortMerge,    // sort merge join
     T_Sort,
-    T_Projection
+    T_Projection,
+    T_Filter,       // 题目四：过滤节点（选择运算）
+    T_explain       // 题目四：EXPLAIN ANALYZE
 } PlanTag;
 
 // 查询执行计划
@@ -105,16 +107,33 @@ class JoinPlan : public Plan
 class ProjectionPlan : public Plan
 {
     public:
-        ProjectionPlan(PlanTag tag, std::shared_ptr<Plan> subplan, std::vector<TabCol> sel_cols)
+        ProjectionPlan(PlanTag tag, std::shared_ptr<Plan> subplan, std::vector<TabCol> sel_cols, bool is_star = false)
         {
             Plan::tag = tag;
             subplan_ = std::move(subplan);
             sel_cols_ = std::move(sel_cols);
+            is_star_ = is_star;
         }
         ~ProjectionPlan(){}
         std::shared_ptr<Plan> subplan_;
         std::vector<TabCol> sel_cols_;
-        
+        bool is_star_;   // 题目四：是否为 SELECT *（EXPLAIN 输出 [*]）
+
+};
+
+// 题目四：过滤节点（选择运算），仅用于 EXPLAIN 计划树
+class FilterPlan : public Plan
+{
+    public:
+        FilterPlan(std::shared_ptr<Plan> subplan, std::vector<Condition> conds)
+        {
+            Plan::tag = T_Filter;
+            subplan_ = std::move(subplan);
+            conds_ = std::move(conds);
+        }
+        ~FilterPlan(){}
+        std::shared_ptr<Plan> subplan_;
+        std::vector<Condition> conds_;
 };
 
 class SortPlan : public Plan

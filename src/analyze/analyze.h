@@ -35,6 +35,11 @@ class Query{
     //insert 的values值
     std::vector<Value> values;
 
+    // 题目四：是否为 EXPLAIN ANALYZE 查询
+    bool explain = false;
+    // 题目四：是否为 SELECT *（用于根 Project 输出 [*]）
+    bool is_star = false;
+
     Query(){}
 
 };
@@ -56,5 +61,7 @@ private:
     void check_clause(const std::vector<std::string> &tab_names, std::vector<Condition> &conds);
     Value convert_sv_value(const std::shared_ptr<ast::Value> &sv_val);
     CompOp convert_sv_comp_op(ast::SvCompOp op);
+    // 题目四：分析 SELECT 语句主体（被 SelectStmt 与 ExplainStmt 复用），处理表别名
+    void analyze_select(const std::shared_ptr<ast::SelectStmt> &x, std::shared_ptr<Query> query);
 };
 

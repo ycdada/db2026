@@ -44,4 +44,7 @@ class QlManager {
                         Context *context);
 
     void run_dml(std::unique_ptr<AbstractExecutor> exec);
+
+    // 题目四：EXPLAIN ANALYZE，执行计划树并输出带运行时行数的计划树
+    void run_explain(std::unique_ptr<AbstractExecutor> executorTreeRoot, Context *context);
 };

@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 限制
+
+你被禁止更改initial commit 中就有的函数，变量名和接口
+
 ## Project Overview
 
 **RMDB** — a relational database management system built for the 2026 National College Student Computer System Capability Competition (database track). It implements a full SQL execution pipeline from parser through query optimization, execution, storage, indexing, transaction management (2PL), and WAL-based crash recovery (ARIES). The target is running TPC-C workloads.

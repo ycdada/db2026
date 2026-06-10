@@ -23,6 +23,7 @@ using namespace ast;
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
 WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
+EXPLAIN ANALYZE AS ON
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 
@@ -52,6 +53,8 @@ WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_CO
 %type <sv_orderby>  order_clause opt_order_clause
 %type <sv_orderby_dir> opt_asc_desc
 %type <sv_setKnobType> set_knob_type
+%type <sv_table_ref> tableRef
+%type <sv_from_clause> fromClause
 
 %%
 start:
@@ -158,9 +161,30 @@ dml:
     {
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
-    |   SELECT selector FROM tableList optWhereClause opt_order_clause
+    |   SELECT selector FROM fromClause optWhereClause opt_order_clause
     {
-        $$ = std::make_shared<SelectStmt>($2, $4, $5, $6);
+        auto sel = std::make_shared<SelectStmt>($2, std::vector<std::string>{}, $5, $6);
+        for (auto &ref : $4->refs) {
+            sel->tabs.push_back(ref->tab_name);
+            sel->tab_alias.push_back(ref->alias);
+        }
+        // 题目四：把 JOIN ... ON 收集到的连接条件并入 where 条件
+        for (auto &c : $4->conds) {
+            sel->conds.push_back(c);
+        }
+        $$ = sel;
+    }
+    |   EXPLAIN ANALYZE SELECT selector FROM fromClause optWhereClause opt_order_clause
+    {
+        auto sel = std::make_shared<SelectStmt>($4, std::vector<std::string>{}, $7, $8);
+        for (auto &ref : $6->refs) {
+            sel->tabs.push_back(ref->tab_name);
+            sel->tab_alias.push_back(ref->alias);
+        }
+        for (auto &c : $6->conds) {
+            sel->conds.push_back(c);
+        }
+        $$ = std::make_shared<ExplainStmt>(sel);
     }
     ;
 
@@ -362,6 +386,47 @@ tableList:
     |   tableList JOIN tbName
     {
         $$.push_back($3);
+    }
+    ;
+
+/* 题目四：表引用，支持可选别名 customers c / customers AS c */
+tableRef:
+        tbName
+    {
+        $$ = std::make_shared<TableRef>($1);
+    }
+    |   tbName IDENTIFIER
+    {
+        $$ = std::make_shared<TableRef>($1, $2);
+    }
+    |   tbName AS IDENTIFIER
+    {
+        $$ = std::make_shared<TableRef>($1, $3);
+    }
+    ;
+
+/* 题目四：FROM 子句，支持逗号连接、JOIN（裸）以及 JOIN ... ON condition */
+fromClause:
+        tableRef
+    {
+        $$ = std::make_shared<FromClause>();
+        $$->refs.push_back($1);
+    }
+    |   fromClause ',' tableRef
+    {
+        $$ = $1;
+        $$->refs.push_back($3);
+    }
+    |   fromClause JOIN tableRef ON condition
+    {
+        $$ = $1;
+        $$->refs.push_back($3);
+        $$->conds.push_back($5);
+    }
+    |   fromClause JOIN tableRef
+    {
+        $$ = $1;
+        $$->refs.push_back($3);
     }
     ;
 
