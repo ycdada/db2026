@@ -10,6 +10,9 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <limits>
+
+#include "execution_common.h"
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
@@ -33,6 +36,40 @@ class IndexScanExecutor : public AbstractExecutor {
     std::unique_ptr<RecScan> scan_;
 
     SmManager *sm_manager_;
+
+    void fill_min_key(char *key, int offset, const ColMeta &col) {
+        if (col.type == TYPE_INT) {
+            int value = std::numeric_limits<int>::min();
+            memcpy(key + offset, &value, sizeof(int));
+        } else if (col.type == TYPE_FLOAT) {
+            float value = std::numeric_limits<float>::lowest();
+            memcpy(key + offset, &value, sizeof(float));
+        } else {
+            memset(key + offset, 0, col.len);
+        }
+    }
+
+    void fill_max_key(char *key, int offset, const ColMeta &col) {
+        if (col.type == TYPE_INT) {
+            int value = std::numeric_limits<int>::max();
+            memcpy(key + offset, &value, sizeof(int));
+        } else if (col.type == TYPE_FLOAT) {
+            float value = std::numeric_limits<float>::max();
+            memcpy(key + offset, &value, sizeof(float));
+        } else {
+            memset(key + offset, 0xff, col.len);
+        }
+    }
+
+    std::vector<Condition> col_conds(const std::string &col_name) {
+        std::vector<Condition> res;
+        for (auto &cond : fed_conds_) {
+            if (cond.is_rhs_val && cond.lhs_col.tab_name == tab_name_ && cond.lhs_col.col_name == col_name) {
+                res.push_back(cond);
+            }
+        }
+        return res;
+    }
 
    public:
     IndexScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds, std::vector<std::string> index_col_names,
@@ -65,16 +102,99 @@ class IndexScanExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
-        
+        auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols)).get();
+        std::vector<char> lower_key(index_meta_.col_tot_len);
+        std::vector<char> upper_key(index_meta_.col_tot_len);
+        bool has_lower = false;
+        bool has_upper = false;
+        bool lower_open = false;
+        bool upper_open = false;
+        bool stop_prefix = false;
+        int offset = 0;
+
+        for (auto &col : index_meta_.cols) {
+            auto conds = stop_prefix ? std::vector<Condition>() : col_conds(col.name);
+            const Condition *eq = nullptr;
+            const Condition *lower = nullptr;
+            const Condition *upper = nullptr;
+            for (auto &cond : conds) {
+                if (cond.op == OP_EQ) {
+                    eq = &cond;
+                } else if (cond.op == OP_GT || cond.op == OP_GE) {
+                    lower = &cond;
+                } else if (cond.op == OP_LT || cond.op == OP_LE) {
+                    upper = &cond;
+                }
+            }
+
+            if (eq != nullptr) {
+                memcpy(lower_key.data() + offset, eq->rhs_val.raw->data, col.len);
+                memcpy(upper_key.data() + offset, eq->rhs_val.raw->data, col.len);
+                has_lower = true;
+                has_upper = true;
+            } else {
+                if (lower != nullptr) {
+                    memcpy(lower_key.data() + offset, lower->rhs_val.raw->data, col.len);
+                    has_lower = true;
+                    lower_open = lower->op == OP_GT;
+                } else {
+                    fill_min_key(lower_key.data(), offset, col);
+                }
+                if (upper != nullptr) {
+                    memcpy(upper_key.data() + offset, upper->rhs_val.raw->data, col.len);
+                    has_upper = true;
+                    upper_open = upper->op == OP_LT;
+                } else {
+                    fill_max_key(upper_key.data(), offset, col);
+                }
+                stop_prefix = true;
+            }
+            offset += col.len;
+        }
+
+        Iid lower = has_lower
+                        ? (lower_open ? ih->upper_bound(lower_key.data()) : ih->lower_bound(lower_key.data()))
+                        : ih->leaf_begin();
+        Iid upper = has_upper
+                        ? (upper_open ? ih->lower_bound(upper_key.data()) : ih->upper_bound(upper_key.data()))
+                        : ih->leaf_end();
+
+        scan_ = std::make_unique<IxScan>(ih, lower, upper, sm_manager_->get_bpm());
+        while (!scan_->is_end()) {
+            auto rec = fh_->get_record(scan_->rid(), context_);
+            if (eval_conds(rec->data, cols_, fed_conds_)) {
+                rid_ = scan_->rid();
+                return;
+            }
+            scan_->next();
+        }
     }
 
     void nextTuple() override {
-        
+        if (scan_ == nullptr) return;
+        scan_->next();
+        while (!scan_->is_end()) {
+            auto rec = fh_->get_record(scan_->rid(), context_);
+            if (eval_conds(rec->data, cols_, fed_conds_)) {
+                rid_ = scan_->rid();
+                return;
+            }
+            scan_->next();
+        }
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        return nullptr;
+        if (scan_ == nullptr || scan_->is_end()) return nullptr;
+        return fh_->get_record(rid_, context_);
     }
+
+    bool is_end() const override {
+        return scan_ == nullptr || scan_->is_end();
+    }
+
+    const std::vector<ColMeta> &cols() const override { return cols_; }
+
+    size_t tupleLen() const override { return len_; }
 
     Rid &rid() override { return rid_; }
 };

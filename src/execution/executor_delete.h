@@ -46,13 +46,13 @@ class DeleteExecutor : public AbstractExecutor {
                 auto &index = tab_.indexes[i];
                 auto ih = sm_manager_->ihs_.at(
                     sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                char key[index.col_tot_len];
+                std::vector<char> key(index.col_tot_len);
                 int offset = 0;
-                for (size_t j = 0; j < index.col_num; ++j) {
-                    memcpy(key + offset, rec->data + index.cols[j].offset, index.cols[j].len);
+                for (int j = 0; j < index.col_num; ++j) {
+                    memcpy(key.data() + offset, rec->data + index.cols[j].offset, index.cols[j].len);
                     offset += index.cols[j].len;
                 }
-                ih->delete_entry(key, context_->txn_);
+                ih->delete_entry(key.data(), context_->txn_);
             }
             // 删除记录
             fh_->delete_record(rid, context_);

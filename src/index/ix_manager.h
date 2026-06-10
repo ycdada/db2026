@@ -157,11 +157,16 @@ class IxManager {
     }
 
     void close_index(const IxIndexHandle *ih) {
+        int fd = ih->fd_;
+        int num_pages = ih->file_hdr_->num_pages_;
         char* data = new char[ih->file_hdr_->tot_len_];
         ih->file_hdr_->serialize(data);
-        disk_manager_->write_page(ih->fd_, IX_FILE_HDR_PAGE, data, ih->file_hdr_->tot_len_);
+        disk_manager_->write_page(fd, IX_FILE_HDR_PAGE, data, ih->file_hdr_->tot_len_);
         // 缓冲区的所有页刷到磁盘，注意这句话必须写在close_file前面
-        buffer_pool_manager_->flush_all_pages(ih->fd_);
-        disk_manager_->close_file(ih->fd_);
+        buffer_pool_manager_->flush_all_pages(fd);
+        for (int page_no = 0; page_no < num_pages; ++page_no) {
+            buffer_pool_manager_->delete_page(PageId{fd, page_no});
+        }
+        disk_manager_->close_file(fd);
     }
 };

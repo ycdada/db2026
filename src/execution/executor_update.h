@@ -41,24 +41,9 @@ class UpdateExecutor : public AbstractExecutor {
         for (auto &rid : rids_) {
             // 获取当前记录
             auto old_rec = fh_->get_record(rid, context_);
+            auto new_rec = std::make_unique<RmRecord>(fh_->get_file_hdr().record_size, old_rec->data);
 
-            // 更新前，删除旧索引项
-            for (size_t i = 0; i < tab_.indexes.size(); ++i) {
-                auto &index = tab_.indexes[i];
-                auto ih = sm_manager_->ihs_.at(
-                    sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                char old_key[index.col_tot_len];
-                int offset = 0;
-                for (size_t j = 0; j < index.col_num; ++j) {
-                    memcpy(old_key + offset, old_rec->data + index.cols[j].offset, index.cols[j].len);
-                    offset += index.cols[j].len;
-                }
-                ih->delete_entry(old_key, context_->txn_);
-            }
-
-            // 应用SET子句：修改记录中的数据
             for (auto &set_clause : set_clauses_) {
-                // 查找对应的列元数据
                 const ColMeta *col_meta = nullptr;
                 for (auto &col : tab_.cols) {
                     if (col.name == set_clause.lhs.col_name) {
@@ -67,27 +52,56 @@ class UpdateExecutor : public AbstractExecutor {
                     }
                 }
                 if (!col_meta) continue;
-                // 将新值写入记录数据
-                memcpy(old_rec->data + col_meta->offset,
-                       set_clause.rhs.raw->data,
-                       col_meta->len);
+                memcpy(new_rec->data + col_meta->offset, set_clause.rhs.raw->data, col_meta->len);
+            }
+
+            for (auto &index : tab_.indexes) {
+                auto ih = sm_manager_->ihs_.at(
+                    sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                std::vector<char> new_key(index.col_tot_len);
+                int offset = 0;
+                for (int j = 0; j < index.col_num; ++j) {
+                    memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
+                    offset += index.cols[j].len;
+                }
+                std::vector<Rid> result;
+                if (ih->get_value(new_key.data(), &result, context_->txn_)) {
+                    bool self = result.size() == 1 && result[0].page_no == rid.page_no && result[0].slot_no == rid.slot_no;
+                    if (!self) {
+                        throw RMDBError("Duplicate key in unique index");
+                    }
+                }
+            }
+
+            // 更新前，删除旧索引项
+            for (size_t i = 0; i < tab_.indexes.size(); ++i) {
+                auto &index = tab_.indexes[i];
+                auto ih = sm_manager_->ihs_.at(
+                    sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                std::vector<char> old_key(index.col_tot_len);
+                int offset = 0;
+                for (int j = 0; j < index.col_num; ++j) {
+                    memcpy(old_key.data() + offset, old_rec->data + index.cols[j].offset, index.cols[j].len);
+                    offset += index.cols[j].len;
+                }
+                ih->delete_entry(old_key.data(), context_->txn_);
             }
 
             // 将更新后的记录写回
-            fh_->update_record(rid, old_rec->data, context_);
+            fh_->update_record(rid, new_rec->data, context_);
 
             // 插入新的索引项
             for (size_t i = 0; i < tab_.indexes.size(); ++i) {
                 auto &index = tab_.indexes[i];
                 auto ih = sm_manager_->ihs_.at(
                     sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                char new_key[index.col_tot_len];
+                std::vector<char> new_key(index.col_tot_len);
                 int offset = 0;
-                for (size_t j = 0; j < index.col_num; ++j) {
-                    memcpy(new_key + offset, old_rec->data + index.cols[j].offset, index.cols[j].len);
+                for (int j = 0; j < index.col_num; ++j) {
+                    memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
                     offset += index.cols[j].len;
                 }
-                ih->insert_entry(new_key, rid, context_->txn_);
+                ih->insert_entry(new_key.data(), rid, context_->txn_);
             }
         }
         return nullptr;

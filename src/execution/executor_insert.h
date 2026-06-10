@@ -49,20 +49,32 @@ class InsertExecutor : public AbstractExecutor {
             val.init_raw(col.len);
             memcpy(rec.data + col.offset, val.raw->data, col.len);
         }
+        for (auto &index : tab_.indexes) {
+            auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+            std::vector<char> key(index.col_tot_len);
+            int offset = 0;
+            for (int i = 0; i < index.col_num; ++i) {
+                memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
+                offset += index.cols[i].len;
+            }
+            std::vector<Rid> result;
+            if (ih->get_value(key.data(), &result, context_->txn_)) {
+                throw RMDBError("Duplicate key in unique index");
+            }
+        }
         // Insert into record file
         rid_ = fh_->insert_record(rec.data, context_);
         
         // Insert into index
-        for(size_t i = 0; i < tab_.indexes.size(); ++i) {
-            auto& index = tab_.indexes[i];
+        for(auto &index : tab_.indexes) {
             auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-            char* key = new char[index.col_tot_len];
+            std::vector<char> key(index.col_tot_len);
             int offset = 0;
-            for(size_t i = 0; i < index.col_num; ++i) {
-                memcpy(key + offset, rec.data + index.cols[i].offset, index.cols[i].len);
+            for(int i = 0; i < index.col_num; ++i) {
+                memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
                 offset += index.cols[i].len;
             }
-            ih->insert_entry(key, rid_, context_->txn_);
+            ih->insert_entry(key.data(), rid_, context_->txn_);
         }
         return nullptr;
     }
