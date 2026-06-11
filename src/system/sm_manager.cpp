@@ -253,6 +253,7 @@ void SmManager::drop_table(const std::string& tab_name, Context* context) {
     auto it_fh = fhs_.find(tab_name);
     if (it_fh != fhs_.end()) {
         buffer_pool_manager_->flush_all_pages(it_fh->second->GetFd());
+        buffer_pool_manager_->delete_all_pages(it_fh->second->GetFd());
         disk_manager_->close_file(it_fh->second->GetFd());
         fhs_.erase(it_fh);
     }

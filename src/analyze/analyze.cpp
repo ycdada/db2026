@@ -186,7 +186,7 @@ void Analyze::analyze_select(const std::shared_ptr<ast::SelectStmt> &x, std::sha
             if (call.arg_type != TYPE_INT && call.arg_type != TYPE_FLOAT) {
                 throw RMDBError("failure");
             }
-            if (call.type == AGG_AVG) {
+            if (call.type == AGG_AVG || call.type == AGG_SUM) {
                 call.result_type = TYPE_FLOAT;
                 call.result_len = sizeof(float);
             } else {
