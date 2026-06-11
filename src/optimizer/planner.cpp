@@ -172,9 +172,17 @@ std::shared_ptr<Plan> Planner::physical_optimization(std::shared_ptr<Query> quer
     std::shared_ptr<Plan> plan = make_one_rel(query);
     
     // 其他物理优化
+    if (query->has_aggregate) {
+        plan = std::make_shared<AggregatePlan>(std::move(plan), query->select_terms, query->agg_calls,
+                                               query->group_cols, query->having_conds);
+    }
 
     // 处理orderby
-    plan = generate_sort_plan(query, std::move(plan)); 
+    plan = generate_sort_plan(query, std::move(plan));
+
+    if (query->limit >= 0) {
+        plan = std::make_shared<LimitPlan>(std::move(plan), query->limit);
+    }
 
     return plan;
 }
@@ -306,24 +314,10 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
 
 std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, std::shared_ptr<Plan> plan)
 {
-    auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
-    if(!x->has_sort) {
+    if(query->order_bys.empty()) {
         return plan;
     }
-    std::vector<std::string> tables = query->tables;
-    std::vector<ColMeta> all_cols;
-    for (auto &sel_tab_name : tables) {
-        // 这里db_不能写成get_db(), 注意要传指针
-        const auto &sel_tab_cols = sm_manager_->db_.get_table(sel_tab_name).cols;
-        all_cols.insert(all_cols.end(), sel_tab_cols.begin(), sel_tab_cols.end());
-    }
-    TabCol sel_col;
-    for (auto &col : all_cols) {
-        if(col.name.compare(x->order->cols->col_name) == 0 )
-        sel_col = {.tab_name = col.tab_name, .col_name = col.name};
-    }
-    return std::make_shared<SortPlan>(T_Sort, std::move(plan), sel_col, 
-                                    x->order->orderby_dir == ast::OrderBy_DESC);
+    return std::make_shared<SortPlan>(T_Sort, std::move(plan), query->order_bys);
 }
 
 

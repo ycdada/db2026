@@ -135,13 +135,97 @@ void Analyze::analyze_select(const std::shared_ptr<ast::SelectStmt> &x, std::sha
             }
         }
         tc.tab_name = real;
+        bool exists = false;
+        for (auto &col : all_cols) {
+            if (col.tab_name == real && col.name == col_name) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            throw ColumnNotFoundError(col_name);
+        }
         auto ait = real2alias.find(real);
         tc.tab_alias = (ait != real2alias.end()) ? ait->second : std::string();
         return tc;
     };
 
+    auto get_col_meta = [&](const TabCol &tc) -> ColMeta {
+        TabMeta &tab = sm_manager_->db_.get_table(tc.tab_name);
+        return *tab.get_col(tc.col_name);
+    };
+
+    auto ast_agg_type = [](ast::AggFuncType type) -> AggFuncType {
+        switch (type) {
+            case ast::Agg_COUNT: return AGG_COUNT;
+            case ast::Agg_MAX: return AGG_MAX;
+            case ast::Agg_MIN: return AGG_MIN;
+            case ast::Agg_SUM: return AGG_SUM;
+            case ast::Agg_AVG: return AGG_AVG;
+        }
+        return AGG_COUNT;
+    };
+
+    auto add_agg_call = [&](const std::shared_ptr<ast::AggExpr> &agg) -> int {
+        AggCall call;
+        call.type = ast_agg_type(agg->func);
+        call.is_star = agg->is_star;
+        if (!call.is_star) {
+            call.col = resolve_col(agg->col->tab_name, agg->col->col_name);
+            auto meta = get_col_meta(call.col);
+            call.arg_type = meta.type;
+        }
+
+        if (call.type == AGG_COUNT) {
+            call.result_type = TYPE_INT;
+            call.result_len = sizeof(int);
+        } else {
+            if (call.is_star) {
+                throw RMDBError("failure");
+            }
+            if (call.arg_type != TYPE_INT && call.arg_type != TYPE_FLOAT) {
+                throw RMDBError("failure");
+            }
+            if (call.type == AGG_AVG) {
+                call.result_type = TYPE_FLOAT;
+                call.result_len = sizeof(float);
+            } else {
+                call.result_type = call.arg_type;
+                call.result_len = (call.arg_type == TYPE_INT) ? sizeof(int) : sizeof(float);
+            }
+        }
+
+        std::string key = call.key();
+        for (size_t i = 0; i < query->agg_calls.size(); i++) {
+            if (query->agg_calls[i].key() == key) {
+                return (int)i;
+            }
+        }
+        query->agg_calls.push_back(call);
+        return (int)query->agg_calls.size() - 1;
+    };
+
+    auto default_agg_name = [](const AggCall &call) {
+        return agg_func_name(call.type) + "(" + (call.is_star ? "*" : call.col.col_name) + ")";
+    };
+
+    auto group_contains = [&](const TabCol &tc) {
+        for (auto &g : query->group_cols) {
+            if (g.tab_name == tc.tab_name && g.col_name == tc.col_name) return true;
+        }
+        return false;
+    };
+
+    // 处理 GROUP BY
+    for (auto &g : x->group_cols) {
+        query->group_cols.push_back(resolve_col(g->tab_name, g->col_name));
+    }
+
     // 处理投影列
-    if (x->cols.empty()) {
+    if (x->items.empty()) {
+        if (!query->group_cols.empty() || !x->having_conds.empty()) {
+            throw RMDBError("failure");
+        }
         // SELECT * ：展开所有列
         query->is_star = true;
         for (auto &col : all_cols) {
@@ -153,14 +237,55 @@ void Analyze::analyze_select(const std::shared_ptr<ast::SelectStmt> &x, std::sha
             query->cols.push_back(sel_col);
         }
     } else {
-        for (auto &sv_sel_col : x->cols) {
-            query->cols.push_back(resolve_col(sv_sel_col->tab_name, sv_sel_col->col_name));
+        for (auto &item : x->items) {
+            SelectTerm term;
+            if (auto sv_col = std::dynamic_pointer_cast<ast::Col>(item->expr)) {
+                term.is_agg = false;
+                term.col = resolve_col(sv_col->tab_name, sv_col->col_name);
+                auto meta = get_col_meta(term.col);
+                term.type = meta.type;
+                term.len = meta.len;
+                term.output_name = item->alias.empty() ? term.col.col_name : item->alias;
+            } else if (auto sv_agg = std::dynamic_pointer_cast<ast::AggExpr>(item->expr)) {
+                term.is_agg = true;
+                term.agg_idx = add_agg_call(sv_agg);
+                auto &call = query->agg_calls[term.agg_idx];
+                term.type = call.result_type;
+                term.len = call.result_len;
+                term.output_name = item->alias.empty() ? default_agg_name(call) : item->alias;
+                query->has_aggregate = true;
+            } else {
+                throw RMDBError("failure");
+            }
+            query->select_terms.push_back(term);
+
+            TabCol out_col;
+            out_col.tab_name = query->has_aggregate || !query->group_cols.empty() ? "__agg" : term.col.tab_name;
+            out_col.col_name = term.output_name;
+            out_col.tab_alias = term.col.tab_alias;
+            query->cols.push_back(out_col);
+        }
+    }
+
+    query->has_aggregate = query->has_aggregate || !query->group_cols.empty() || !x->having_conds.empty();
+
+    if (query->has_aggregate) {
+        for (auto &term : query->select_terms) {
+            if (!term.is_agg && !group_contains(term.col)) {
+                throw RMDBError("failure");
+            }
+        }
+        for (auto &out_col : query->cols) {
+            out_col.tab_name = "__agg";
         }
     }
 
     // 处理 where / JOIN ON 条件（已在语法层合并到 x->conds）
     query->conds.clear();
     for (auto &expr : x->conds) {
+        if (expr->lhs->col_name == "__agg_in_where__") {
+            throw RMDBError("failure");
+        }
         Condition cond;
         cond.lhs_col = resolve_col(expr->lhs->tab_name, expr->lhs->col_name);
         cond.op = convert_sv_comp_op(expr->op);
@@ -198,6 +323,89 @@ void Analyze::analyze_select(const std::shared_ptr<ast::SelectStmt> &x, std::sha
             throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
         }
     }
+
+    auto convert_having_term = [&](const std::shared_ptr<ast::Expr> &expr) -> AggTerm {
+        AggTerm term;
+        if (auto sv_agg = std::dynamic_pointer_cast<ast::AggExpr>(expr)) {
+            term.kind = AGG_TERM_AGG;
+            term.agg_idx = add_agg_call(sv_agg);
+            auto &call = query->agg_calls[term.agg_idx];
+            term.type = call.result_type;
+            term.len = call.result_len;
+            query->has_aggregate = true;
+        } else if (auto sv_col = std::dynamic_pointer_cast<ast::Col>(expr)) {
+            term.kind = AGG_TERM_COL;
+            term.col = resolve_col(sv_col->tab_name, sv_col->col_name);
+            if (!group_contains(term.col)) {
+                throw RMDBError("failure");
+            }
+            auto meta = get_col_meta(term.col);
+            term.type = meta.type;
+            term.len = meta.len;
+        } else if (auto sv_val = std::dynamic_pointer_cast<ast::Value>(expr)) {
+            term.kind = AGG_TERM_VALUE;
+            term.val = convert_sv_value(sv_val);
+            term.type = term.val.type;
+            term.len = (term.type == TYPE_STRING) ? (int)term.val.str_val.size() : (int)sizeof(int);
+            if (term.type == TYPE_FLOAT) term.len = sizeof(float);
+        } else {
+            throw RMDBError("failure");
+        }
+        return term;
+    };
+
+    // 处理 HAVING
+    for (auto &sv_having : x->having_conds) {
+        AggHavingCond cond;
+        cond.lhs = convert_having_term(sv_having->lhs);
+        cond.op = convert_sv_comp_op(sv_having->op);
+        cond.rhs = convert_having_term(sv_having->rhs);
+        bool numeric = (cond.lhs.type == TYPE_INT || cond.lhs.type == TYPE_FLOAT) &&
+                       (cond.rhs.type == TYPE_INT || cond.rhs.type == TYPE_FLOAT);
+        if (!numeric && cond.lhs.type != cond.rhs.type) {
+            throw RMDBError("failure");
+        }
+        query->having_conds.push_back(cond);
+    }
+
+    if (query->has_aggregate) {
+        for (auto &term : query->select_terms) {
+            if (!term.is_agg && !group_contains(term.col)) {
+                throw RMDBError("failure");
+            }
+        }
+        for (auto &out_col : query->cols) {
+            out_col.tab_name = "__agg";
+        }
+    }
+
+    // 处理 ORDER BY / LIMIT
+    if (x->has_sort) {
+        for (size_t i = 0; i < x->order->cols.size(); i++) {
+            OrderByTerm order;
+            auto &sv_col = x->order->cols[i];
+            if (query->has_aggregate) {
+                bool found = false;
+                for (auto &out : query->cols) {
+                    if (out.col_name == sv_col->col_name) {
+                        order.col = out;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    TabCol raw = resolve_col(sv_col->tab_name, sv_col->col_name);
+                    if (!group_contains(raw)) throw RMDBError("failure");
+                    order.col = {.tab_name = "__agg", .col_name = raw.col_name};
+                }
+            } else {
+                order.col = resolve_col(sv_col->tab_name, sv_col->col_name);
+            }
+            order.is_desc = i < x->order->orderby_dirs.size() && x->order->orderby_dirs[i] == ast::OrderBy_DESC;
+            query->order_bys.push_back(order);
+        }
+    }
+    query->limit = x->limit;
 }
 
 

@@ -81,6 +81,63 @@ struct Value {
 
 enum CompOp { OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE };
 
+enum AggFuncType { AGG_COUNT, AGG_MAX, AGG_MIN, AGG_SUM, AGG_AVG };
+
+inline std::string agg_func_name(AggFuncType type) {
+    switch (type) {
+        case AGG_COUNT: return "COUNT";
+        case AGG_MAX: return "MAX";
+        case AGG_MIN: return "MIN";
+        case AGG_SUM: return "SUM";
+        case AGG_AVG: return "AVG";
+    }
+    return "";
+}
+
+struct AggCall {
+    AggFuncType type;
+    TabCol col;
+    bool is_star = false;
+    ColType arg_type = TYPE_INT;
+    ColType result_type = TYPE_INT;
+    int result_len = sizeof(int);
+
+    std::string key() const {
+        return agg_func_name(type) + "(" + (is_star ? "*" : col.tab_name + "." + col.col_name) + ")";
+    }
+};
+
+struct SelectTerm {
+    bool is_agg = false;
+    TabCol col;
+    int agg_idx = -1;
+    std::string output_name;
+    ColType type = TYPE_INT;
+    int len = sizeof(int);
+};
+
+enum AggTermKind { AGG_TERM_COL, AGG_TERM_AGG, AGG_TERM_VALUE };
+
+struct AggTerm {
+    AggTermKind kind = AGG_TERM_VALUE;
+    TabCol col;
+    int agg_idx = -1;
+    Value val;
+    ColType type = TYPE_INT;
+    int len = sizeof(int);
+};
+
+struct AggHavingCond {
+    AggTerm lhs;
+    CompOp op;
+    AggTerm rhs;
+};
+
+struct OrderByTerm {
+    TabCol col;
+    bool is_desc = false;
+};
+
 struct Condition {
     TabCol lhs_col;   // left-hand side column
     CompOp op;        // comparison operator

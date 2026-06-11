@@ -23,7 +23,7 @@ using namespace ast;
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
 WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
-EXPLAIN ANALYZE AS ON
+EXPLAIN ANALYZE AS ON GROUP HAVING LIMIT COUNT MAX MIN SUM AVG
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 
@@ -42,16 +42,22 @@ EXPLAIN ANALYZE AS ON
 %type <sv_expr> expr
 %type <sv_val> value
 %type <sv_vals> valueList
-%type <sv_str> tbName colName
+%type <sv_str> tbName colName optAlias
 %type <sv_strs> tableList colNameList
 %type <sv_col> col
-%type <sv_cols> colList selector
+%type <sv_cols> colList group_clause opt_group_clause
+%type <sv_select_items> selector selectList
+%type <sv_select_item> selectItem
+%type <sv_agg_expr> aggregate
+%type <sv_having_cond> havingCondition
+%type <sv_having_conds> havingClause opt_having_clause
 %type <sv_set_clause> setClause
 %type <sv_set_clauses> setClauses
 %type <sv_cond> condition
 %type <sv_conds> whereClause optWhereClause
 %type <sv_orderby>  order_clause opt_order_clause
 %type <sv_orderby_dir> opt_asc_desc
+%type <sv_int> opt_limit_clause
 %type <sv_setKnobType> set_knob_type
 %type <sv_table_ref> tableRef
 %type <sv_from_clause> fromClause
@@ -161,9 +167,15 @@ dml:
     {
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
-    |   SELECT selector FROM fromClause optWhereClause opt_order_clause
+    |   SELECT selector FROM fromClause optWhereClause opt_group_clause opt_having_clause opt_order_clause opt_limit_clause
     {
-        auto sel = std::make_shared<SelectStmt>($2, std::vector<std::string>{}, $5, $6);
+        std::vector<std::shared_ptr<Col>> legacy_cols;
+        for (auto &item : $2) {
+            if (auto c = std::dynamic_pointer_cast<Col>(item->expr)) {
+                legacy_cols.push_back(c);
+            }
+        }
+        auto sel = std::make_shared<SelectStmt>(legacy_cols, $2, std::vector<std::string>{}, $5, $8, $6, $7, $9);
         for (auto &ref : $4->refs) {
             sel->tabs.push_back(ref->tab_name);
             sel->tab_alias.push_back(ref->alias);
@@ -174,9 +186,15 @@ dml:
         }
         $$ = sel;
     }
-    |   EXPLAIN ANALYZE SELECT selector FROM fromClause optWhereClause opt_order_clause
+    |   EXPLAIN ANALYZE SELECT selector FROM fromClause optWhereClause opt_group_clause opt_having_clause opt_order_clause opt_limit_clause
     {
-        auto sel = std::make_shared<SelectStmt>($4, std::vector<std::string>{}, $7, $8);
+        std::vector<std::shared_ptr<Col>> legacy_cols;
+        for (auto &item : $4) {
+            if (auto c = std::dynamic_pointer_cast<Col>(item->expr)) {
+                legacy_cols.push_back(c);
+            }
+        }
+        auto sel = std::make_shared<SelectStmt>(legacy_cols, $4, std::vector<std::string>{}, $7, $10, $8, $9, $11);
         for (auto &ref : $6->refs) {
             sel->tabs.push_back(ref->tab_name);
             sel->tab_alias.push_back(ref->alias);
@@ -266,6 +284,21 @@ condition:
         col op expr
     {
         $$ = std::make_shared<BinaryExpr>($1, $2, $3);
+    }
+    |   aggregate op expr
+    {
+        $$ = std::make_shared<BinaryExpr>(std::make_shared<Col>("", "__agg_in_where__"), $2,
+                                          std::static_pointer_cast<Expr>(std::make_shared<IntLit>(0)));
+    }
+    |   col op aggregate
+    {
+        $$ = std::make_shared<BinaryExpr>(std::make_shared<Col>("", "__agg_in_where__"), $2,
+                                          std::static_pointer_cast<Expr>(std::make_shared<IntLit>(0)));
+    }
+    |   aggregate op aggregate
+    {
+        $$ = std::make_shared<BinaryExpr>(std::make_shared<Col>("", "__agg_in_where__"), $2,
+                                          std::static_pointer_cast<Expr>(std::make_shared<IntLit>(0)));
     }
     ;
 
@@ -371,7 +404,62 @@ selector:
     {
         $$ = {};
     }
-    |   colList
+    |   selectList
+    ;
+
+selectList:
+        selectItem
+    {
+        $$ = std::vector<std::shared_ptr<SelectItem>>{$1};
+    }
+    |   selectList ',' selectItem
+    {
+        $$.push_back($3);
+    }
+    ;
+
+selectItem:
+        col optAlias
+    {
+        $$ = std::make_shared<SelectItem>(std::static_pointer_cast<Expr>($1), $2);
+    }
+    |   aggregate optAlias
+    {
+        $$ = std::make_shared<SelectItem>(std::static_pointer_cast<Expr>($1), $2);
+    }
+    ;
+
+optAlias:
+        /* epsilon */ { $$ = ""; }
+    |   AS IDENTIFIER { $$ = $2; }
+    |   IDENTIFIER { $$ = $1; }
+    ;
+
+aggregate:
+        COUNT '(' '*' ')'
+    {
+        $$ = std::make_shared<AggExpr>(Agg_COUNT, nullptr, true);
+    }
+    |   COUNT '(' col ')'
+    {
+        $$ = std::make_shared<AggExpr>(Agg_COUNT, $3, false);
+    }
+    |   MAX '(' col ')'
+    {
+        $$ = std::make_shared<AggExpr>(Agg_MAX, $3, false);
+    }
+    |   MIN '(' col ')'
+    {
+        $$ = std::make_shared<AggExpr>(Agg_MIN, $3, false);
+    }
+    |   SUM '(' col ')'
+    {
+        $$ = std::make_shared<AggExpr>(Agg_SUM, $3, false);
+    }
+    |   AVG '(' col ')'
+    {
+        $$ = std::make_shared<AggExpr>(Agg_AVG, $3, false);
+    }
     ;
 
 tableList:
@@ -443,6 +531,11 @@ order_clause:
     { 
         $$ = std::make_shared<OrderBy>($1, $2);
     }
+    | order_clause ',' col opt_asc_desc
+    {
+        $$ = $1;
+        $$->append($3, $4);
+    }
     ;   
 
 opt_asc_desc:
@@ -450,6 +543,68 @@ opt_asc_desc:
     |  DESC      { $$ = OrderBy_DESC;    }
     |       { $$ = OrderBy_DEFAULT; }
     ;    
+
+opt_group_clause:
+        /* epsilon */ { $$ = {}; }
+    |   GROUP BY group_clause
+    {
+        $$ = $3;
+    }
+    ;
+
+group_clause:
+        col
+    {
+        $$ = std::vector<std::shared_ptr<Col>>{$1};
+    }
+    |   group_clause ',' col
+    {
+        $$.push_back($3);
+    }
+    ;
+
+opt_having_clause:
+        /* epsilon */ { $$ = {}; }
+    |   HAVING havingClause
+    {
+        $$ = $2;
+    }
+    ;
+
+havingClause:
+        havingCondition
+    {
+        $$ = std::vector<std::shared_ptr<HavingExpr>>{$1};
+    }
+    |   havingClause AND havingCondition
+    {
+        $$.push_back($3);
+    }
+    ;
+
+havingCondition:
+        expr op expr
+    {
+        $$ = std::make_shared<HavingExpr>($1, $2, $3);
+    }
+    |   aggregate op expr
+    {
+        $$ = std::make_shared<HavingExpr>(std::static_pointer_cast<Expr>($1), $2, $3);
+    }
+    |   expr op aggregate
+    {
+        $$ = std::make_shared<HavingExpr>($1, $2, std::static_pointer_cast<Expr>($3));
+    }
+    |   aggregate op aggregate
+    {
+        $$ = std::make_shared<HavingExpr>(std::static_pointer_cast<Expr>($1), $2, std::static_pointer_cast<Expr>($3));
+    }
+    ;
+
+opt_limit_clause:
+        /* epsilon */ { $$ = -1; }
+    |   LIMIT VALUE_INT { $$ = $2; }
+    ;
 
 set_knob_type:
     ENABLE_NESTLOOP { $$ = EnableNestLoop; }

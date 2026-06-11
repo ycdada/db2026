@@ -43,6 +43,8 @@ typedef enum PlanTag{
     T_NestLoop,
     T_SortMerge,    // sort merge join
     T_Sort,
+    T_Aggregate,
+    T_Limit,
     T_Projection,
     T_Filter,       // 题目四：过滤节点（选择运算）
     T_explain       // 题目四：EXPLAIN ANALYZE
@@ -139,18 +141,52 @@ class FilterPlan : public Plan
 class SortPlan : public Plan
 {
     public:
-        SortPlan(PlanTag tag, std::shared_ptr<Plan> subplan, TabCol sel_col, bool is_desc)
+        SortPlan(PlanTag tag, std::shared_ptr<Plan> subplan, std::vector<OrderByTerm> order_bys)
         {
             Plan::tag = tag;
             subplan_ = std::move(subplan);
-            sel_col_ = sel_col;
-            is_desc_ = is_desc;
+            order_bys_ = std::move(order_bys);
         }
         ~SortPlan(){}
         std::shared_ptr<Plan> subplan_;
-        TabCol sel_col_;
-        bool is_desc_;
+        std::vector<OrderByTerm> order_bys_;
         
+};
+
+class AggregatePlan : public Plan
+{
+    public:
+        AggregatePlan(std::shared_ptr<Plan> subplan, std::vector<SelectTerm> select_terms,
+                      std::vector<AggCall> agg_calls, std::vector<TabCol> group_cols,
+                      std::vector<AggHavingCond> having_conds)
+        {
+            Plan::tag = T_Aggregate;
+            subplan_ = std::move(subplan);
+            select_terms_ = std::move(select_terms);
+            agg_calls_ = std::move(agg_calls);
+            group_cols_ = std::move(group_cols);
+            having_conds_ = std::move(having_conds);
+        }
+        ~AggregatePlan(){}
+        std::shared_ptr<Plan> subplan_;
+        std::vector<SelectTerm> select_terms_;
+        std::vector<AggCall> agg_calls_;
+        std::vector<TabCol> group_cols_;
+        std::vector<AggHavingCond> having_conds_;
+};
+
+class LimitPlan : public Plan
+{
+    public:
+        LimitPlan(std::shared_ptr<Plan> subplan, int limit)
+        {
+            Plan::tag = T_Limit;
+            subplan_ = std::move(subplan);
+            limit_ = limit;
+        }
+        ~LimitPlan(){}
+        std::shared_ptr<Plan> subplan_;
+        int limit_;
 };
 
 // dml语句，包括insert; delete; update; select语句　

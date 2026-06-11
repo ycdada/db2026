@@ -28,6 +28,13 @@ class Query{
     std::vector<Condition> conds;
     // 投影列
     std::vector<TabCol> cols;
+    std::vector<SelectTerm> select_terms;
+    std::vector<AggCall> agg_calls;
+    std::vector<TabCol> group_cols;
+    std::vector<AggHavingCond> having_conds;
+    std::vector<OrderByTerm> order_bys;
+    bool has_aggregate = false;
+    int limit = -1;
     // 表名
     std::vector<std::string> tables;
     // update 的set 值
