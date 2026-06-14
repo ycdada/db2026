@@ -14,6 +14,38 @@ See the Mulan PSL v2 for more details. */
 
 std::unordered_map<txn_id_t, Transaction *> TransactionManager::txn_map = {};
 
+namespace {
+
+std::vector<char> make_index_key(const RmRecord &record, const IndexMeta &index) {
+    std::vector<char> key(index.col_tot_len);
+    int offset = 0;
+    for (int i = 0; i < index.col_num; ++i) {
+        memcpy(key.data() + offset, record.data + index.cols[i].offset, index.cols[i].len);
+        offset += index.cols[i].len;
+    }
+    return key;
+}
+
+void insert_index_entries(SmManager *sm_manager, const std::string &tab_name, const TabMeta &tab,
+                          const RmRecord &record, const Rid &rid, Transaction *txn) {
+    for (auto &index : tab.indexes) {
+        auto ih = sm_manager->ihs_.at(sm_manager->get_ix_manager()->get_index_name(tab_name, index.cols)).get();
+        auto key = make_index_key(record, index);
+        ih->insert_entry(key.data(), rid, txn);
+    }
+}
+
+void delete_index_entries(SmManager *sm_manager, const std::string &tab_name, const TabMeta &tab,
+                          const RmRecord &record, Transaction *txn) {
+    for (auto &index : tab.indexes) {
+        auto ih = sm_manager->ihs_.at(sm_manager->get_ix_manager()->get_index_name(tab_name, index.cols)).get();
+        auto key = make_index_key(record, index);
+        ih->delete_entry(key.data(), txn);
+    }
+}
+
+}
+
 /**
  * @description: 事务的开始方法
  * @return {Transaction*} 开始事务的指针
@@ -56,6 +88,12 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     // 如果需要支持MVCC请在上述过程中添加代码
     if (txn == nullptr) return;
 
+    auto write_set = txn->get_write_set();
+    while (!write_set->empty()) {
+        delete write_set->back();
+        write_set->pop_back();
+    }
+
     // 释放所有锁
     auto lock_set = txn->get_lock_set();
     for (auto &lock_id : *lock_set) {
@@ -81,6 +119,43 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     // 5. 更新事务状态
     // 如果需要支持MVCC请在上述过程中添加代码
     if (txn == nullptr) return;
+
+    auto write_set = txn->get_write_set();
+    while (!write_set->empty()) {
+        WriteRecord *write_record = write_set->back();
+        write_set->pop_back();
+
+        const std::string &tab_name = write_record->GetTableName();
+        TabMeta &tab = sm_manager_->db_.get_table(tab_name);
+        RmFileHandle *fh = sm_manager_->fhs_.at(tab_name).get();
+        Rid rid = write_record->GetRid();
+
+        switch (write_record->GetWriteType()) {
+            case WType::INSERT_TUPLE: {
+                auto rec = fh->get_record(rid, nullptr);
+                delete_index_entries(sm_manager_, tab_name, tab, *rec, txn);
+                fh->delete_record(rid, nullptr);
+                break;
+            }
+            case WType::DELETE_TUPLE: {
+                RmRecord &old_rec = write_record->GetRecord();
+                fh->insert_record(rid, old_rec.data);
+                insert_index_entries(sm_manager_, tab_name, tab, old_rec, rid, txn);
+                break;
+            }
+            case WType::UPDATE_TUPLE: {
+                auto curr_rec = fh->get_record(rid, nullptr);
+                delete_index_entries(sm_manager_, tab_name, tab, *curr_rec, txn);
+
+                RmRecord &old_rec = write_record->GetRecord();
+                fh->update_record(rid, old_rec.data, nullptr);
+                insert_index_entries(sm_manager_, tab_name, tab, old_rec, rid, txn);
+                break;
+            }
+        }
+
+        delete write_record;
+    }
 
     // 释放所有锁
     auto lock_set = txn->get_lock_set();

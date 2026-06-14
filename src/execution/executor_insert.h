@@ -82,6 +82,9 @@ class InsertExecutor : public AbstractExecutor {
             }
             ih->insert_entry(key.data(), rid_, context_->txn_);
         }
+        if (context_->txn_ != nullptr) {
+            context_->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_));
+        }
         return nullptr;
     }
     Rid &rid() override { return rid_; }

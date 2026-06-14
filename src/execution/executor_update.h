@@ -89,6 +89,9 @@ class UpdateExecutor : public AbstractExecutor {
 
             // 将更新后的记录写回
             fh_->update_record(rid, new_rec->data, context_);
+            if (context_->txn_ != nullptr) {
+                context_->txn_->append_write_record(new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *old_rec));
+            }
 
             // 插入新的索引项
             for (size_t i = 0; i < tab_.indexes.size(); ++i) {
