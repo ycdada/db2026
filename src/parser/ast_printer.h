@@ -152,6 +152,9 @@ private:
             print_node_list(x->cols, offset);
             print_val_list(x->tabs, offset);
             print_node_list(x->conds, offset);
+        } else if (auto x = std::dynamic_pointer_cast<UnionStmt>(node)) {
+            std::cout << "UNION\n";
+            print_node_list(x->branches, offset);
         } else if (auto x = std::dynamic_pointer_cast<TxnBegin>(node)) {
             std::cout << "BEGIN\n";
         } else if (auto x = std::dynamic_pointer_cast<TxnCommit>(node)) {

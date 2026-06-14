@@ -3,3 +3,5 @@ build/
 DB2025/
 test_explain/
 testdb*/
+AGENTS.md
+CLAUDE.md

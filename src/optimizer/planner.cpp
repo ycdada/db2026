@@ -90,6 +90,22 @@ std::vector<Condition> pop_conds(std::vector<Condition> &conds, std::string tab_
     return solved_conds;
 }
 
+static bool plan_has_source(const std::shared_ptr<Plan> &plan, const std::string &source)
+{
+    if(auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
+        return x->tab_name_ == source;
+    } else if (auto x = std::dynamic_pointer_cast<RenamePlan>(plan)) {
+        return !x->cols_.empty() && x->cols_[0].tab_name == source;
+    } else if (auto x = std::dynamic_pointer_cast<FilterPlan>(plan)) {
+        return plan_has_source(x->subplan_, source);
+    } else if (auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
+        return plan_has_source(x->subplan_, source);
+    } else if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
+        return plan_has_source(x->left_, source) || plan_has_source(x->right_, source);
+    }
+    return false;
+}
+
 int push_conds(Condition *cond, std::shared_ptr<Plan> plan)
 {
     if(auto x = std::dynamic_pointer_cast<ScanPlan>(plan))
@@ -135,6 +151,11 @@ int push_conds(Condition *cond, std::shared_ptr<Plan> plan)
         // 题目四：透传到子节点
         return push_conds(cond, x->subplan_);
     }
+    else if(auto x = std::dynamic_pointer_cast<RenamePlan>(plan))
+    {
+        return plan_has_source(plan, cond->lhs_col.tab_name) ? 1 :
+               (!cond->is_rhs_val && plan_has_source(plan, cond->rhs_col.tab_name) ? 2 : 0);
+    }
     else if(auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan))
     {
         // 题目四：透传到子节点
@@ -147,11 +168,10 @@ std::shared_ptr<Plan> pop_scan(int *scantbl, std::string table, std::vector<std:
                 std::vector<std::shared_ptr<Plan>> plans)
 {
     for (size_t i = 0; i < plans.size(); i++) {
-        auto x = std::dynamic_pointer_cast<ScanPlan>(plans[i]);
-        if(x->tab_name_.compare(table) == 0)
+        if(plan_has_source(plans[i], table))
         {
             scantbl[i] = 1;
-            joined_tables.emplace_back(x->tab_name_);
+            joined_tables.emplace_back(table);
             return plans[i];
         }
     }
@@ -167,9 +187,37 @@ std::shared_ptr<Query> Planner::logical_optimization(std::shared_ptr<Query> quer
     return query;
 }
 
+std::shared_ptr<Plan> Planner::make_query_plan(std::shared_ptr<Query> query, Context *context) {
+    if (!query->union_children.empty()) {
+        std::vector<std::shared_ptr<Plan>> children;
+        for (auto &child : query->union_children) {
+            children.push_back(generate_select_plan(child, context));
+        }
+        return std::make_shared<UnionPlan>(std::move(children), query->output_cols);
+    }
+    return generate_select_plan(query, context);
+}
+
+std::shared_ptr<Plan> Planner::build_source_plan(const QuerySource &source, Context *context) {
+    if (!source.is_derived) {
+        return nullptr;
+    }
+    auto plan = make_query_plan(source.derived_query, context);
+    return std::make_shared<RenamePlan>(std::move(plan), source.cols);
+}
+
 std::shared_ptr<Plan> Planner::physical_optimization(std::shared_ptr<Query> query, Context *context)
 {
-    std::shared_ptr<Plan> plan = make_one_rel(query);
+    std::shared_ptr<Plan> plan;
+    if (!query->union_children.empty()) {
+        std::vector<std::shared_ptr<Plan>> children;
+        for (auto &child : query->union_children) {
+            children.push_back(generate_select_plan(child, context));
+        }
+        plan = std::make_shared<UnionPlan>(std::move(children), query->output_cols);
+    } else {
+        plan = make_one_rel(query, context);
+    }
     
     // 其他物理优化
     if (query->has_aggregate) {
@@ -189,22 +237,27 @@ std::shared_ptr<Plan> Planner::physical_optimization(std::shared_ptr<Query> quer
 
 
 
-std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
+std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query, Context *context)
 {
-    auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
     std::vector<std::string> tables = query->tables;
-    // // Scan table , 生成表算子列表tab_nodes
     std::vector<std::shared_ptr<Plan>> table_scan_executors(tables.size());
     for (size_t i = 0; i < tables.size(); i++) {
+        const QuerySource *source = i < query->sources.size() ? &query->sources[i] : nullptr;
         auto curr_conds = pop_conds(query->conds, tables[i]);
-        // int index_no = get_indexNo(tables[i], curr_conds);
+        if (source != nullptr && source->is_derived) {
+            table_scan_executors[i] = build_source_plan(*source, context);
+            if (!curr_conds.empty()) {
+                table_scan_executors[i] = std::make_shared<FilterPlan>(table_scan_executors[i], curr_conds);
+            }
+            continue;
+        }
         std::vector<std::string> index_col_names;
         bool index_exist = get_index_cols(tables[i], curr_conds, index_col_names);
-        if (index_exist == false) {  // 该表没有索引
+        if (index_exist == false) {
             index_col_names.clear();
-            table_scan_executors[i] = 
+            table_scan_executors[i] =
                 std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
-        } else {  // 存在索引
+        } else {
             table_scan_executors[i] =
                 std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, tables[i], curr_conds, index_col_names);
         }
@@ -600,9 +653,9 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         plannerRoot = std::make_shared<DMLPlan>(T_Update, table_scan_executors, x->tab_name,
                                                      std::vector<Value>(), query->conds, 
                                                      query->set_clauses);
-    } else if (auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse)) {
+    } else if (std::dynamic_pointer_cast<ast::SelectStmt>(query->parse) ||
+               std::dynamic_pointer_cast<ast::UnionStmt>(query->parse)) {
 
-        std::shared_ptr<plannerInfo> root = std::make_shared<plannerInfo>(x);
         // 题目四：EXPLAIN ANALYZE 走独立的计划构建（谓词/投影下推 + 基数连接顺序）
         if (query->explain) {
             std::shared_ptr<Plan> projection = generate_explain_plan(query, context);

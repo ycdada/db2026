@@ -20,6 +20,16 @@ See the Mulan PSL v2 for more details. */
 #include "system/sm.h"
 #include "common/common.h"
 
+class Query;
+
+struct QuerySource {
+    bool is_derived = false;
+    std::string name;                         // real table name or derived-table alias
+    std::string alias;                        // display alias, if any
+    std::shared_ptr<Query> derived_query;     // set when is_derived is true
+    std::vector<ColMeta> cols;                // source output schema
+};
+
 class Query{
     public:
     std::shared_ptr<ast::TreeNode> parse;
@@ -33,6 +43,9 @@ class Query{
     std::vector<TabCol> group_cols;
     std::vector<AggHavingCond> having_conds;
     std::vector<OrderByTerm> order_bys;
+    std::vector<ColMeta> output_cols;
+    std::vector<QuerySource> sources;
+    std::vector<std::shared_ptr<Query>> union_children;
     bool has_aggregate = false;
     int limit = -1;
     // 表名
@@ -68,6 +81,8 @@ private:
     void check_clause(const std::vector<std::string> &tab_names, std::vector<Condition> &conds);
     Value convert_sv_value(const std::shared_ptr<ast::Value> &sv_val);
     CompOp convert_sv_comp_op(ast::SvCompOp op);
+    std::shared_ptr<Query> analyze_query_expr(const std::shared_ptr<ast::TreeNode> &root);
+    void analyze_union(const std::shared_ptr<ast::UnionStmt> &x, std::shared_ptr<Query> query);
     // 题目四：分析 SELECT 语句主体（被 SelectStmt 与 ExplainStmt 复用），处理表别名
     void analyze_select(const std::shared_ptr<ast::SelectStmt> &x, std::shared_ptr<Query> query);
 };

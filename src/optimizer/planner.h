@@ -47,7 +47,9 @@ class Planner {
     std::shared_ptr<Query> logical_optimization(std::shared_ptr<Query> query, Context *context);
     std::shared_ptr<Plan> physical_optimization(std::shared_ptr<Query> query, Context *context);
 
-    std::shared_ptr<Plan> make_one_rel(std::shared_ptr<Query> query);
+    std::shared_ptr<Plan> make_one_rel(std::shared_ptr<Query> query, Context *context);
+    std::shared_ptr<Plan> make_query_plan(std::shared_ptr<Query> query, Context *context);
+    std::shared_ptr<Plan> build_source_plan(const QuerySource &source, Context *context);
 
     std::shared_ptr<Plan> generate_sort_plan(std::shared_ptr<Query> query, std::shared_ptr<Plan> plan);
 

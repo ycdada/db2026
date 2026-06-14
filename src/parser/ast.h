@@ -266,9 +266,14 @@ struct JoinExpr : public TreeNode {
 struct TableRef : public TreeNode {
     std::string tab_name;   // 真实表名
     std::string alias;      // 表别名，没有则为空串
+    std::shared_ptr<TreeNode> derived_query;  // 题目六：派生表子查询
+    bool is_derived = false;
 
     TableRef(std::string tab_name_, std::string alias_ = "") :
             tab_name(std::move(tab_name_)), alias(std::move(alias_)) {}
+
+    TableRef(std::shared_ptr<TreeNode> derived_query_, std::string alias_) :
+            alias(std::move(alias_)), derived_query(std::move(derived_query_)), is_derived(true) {}
 };
 
 // 题目四：FROM 子句，收集表引用以及 JOIN ... ON 产生的连接条件
@@ -284,6 +289,7 @@ struct SelectStmt : public TreeNode {
     std::vector<std::string> tab_alias;   // 题目四：与 tabs 平行的别名列表，无别名为空串
     std::vector<std::shared_ptr<BinaryExpr>> conds;
     std::vector<std::shared_ptr<JoinExpr>> jointree;
+    std::vector<std::shared_ptr<TableRef>> from_refs;  // 题目六：真实表/派生表统一 FROM 源
     std::vector<std::shared_ptr<Col>> group_cols;
     std::vector<std::shared_ptr<HavingExpr>> having_conds;
 
@@ -306,6 +312,19 @@ struct SelectStmt : public TreeNode {
             order(std::move(order_)), limit(limit_) {
                 has_sort = (bool)order;
             }
+};
+
+struct UnionStmt : public TreeNode {
+    std::vector<std::shared_ptr<TreeNode>> branches;
+
+    UnionStmt(std::shared_ptr<TreeNode> lhs, std::shared_ptr<TreeNode> rhs) {
+        branches.push_back(std::move(lhs));
+        branches.push_back(std::move(rhs));
+    }
+
+    void append(std::shared_ptr<TreeNode> branch) {
+        branches.push_back(std::move(branch));
+    }
 };
 
 // 题目四：EXPLAIN ANALYZE 语句，包裹内层的 SELECT 语句

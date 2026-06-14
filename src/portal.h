@@ -25,6 +25,8 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_filter.h"
 #include "execution/executor_aggregate.h"
 #include "execution/executor_limit.h"
+#include "execution/executor_rename.h"
+#include "execution/executor_union.h"
 #include "execution/execution_sort.h"
 #include "common/common.h"
 
@@ -176,6 +178,8 @@ class Portal
         if(auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)){
             return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context),
                                                         x->sel_cols_, x->is_star_);
+        } else if(auto x = std::dynamic_pointer_cast<RenamePlan>(plan)) {
+            return std::make_unique<RenameExecutor>(convert_plan_executor(x->subplan_, context), x->cols_);
         } else if(auto x = std::dynamic_pointer_cast<FilterPlan>(plan)) {
             // 题目四：过滤节点
             return std::make_unique<FilterExecutor>(convert_plan_executor(x->subplan_, context), x->conds_);
@@ -196,6 +200,12 @@ class Portal
         } else if(auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
             return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context), 
                                             x->order_bys_);
+        } else if(auto x = std::dynamic_pointer_cast<UnionPlan>(plan)) {
+            std::vector<std::unique_ptr<AbstractExecutor>> children;
+            for (auto &child : x->children_) {
+                children.push_back(convert_plan_executor(child, context));
+            }
+            return std::make_unique<UnionExecutor>(std::move(children), x->output_cols_);
         } else if(auto x = std::dynamic_pointer_cast<AggregatePlan>(plan)) {
             return std::make_unique<AggregateExecutor>(convert_plan_executor(x->subplan_, context),
                                             x->select_terms_, x->agg_calls_, x->group_cols_, x->having_conds_);

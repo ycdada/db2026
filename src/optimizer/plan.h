@@ -42,10 +42,12 @@ typedef enum PlanTag{
     T_IndexScan,
     T_NestLoop,
     T_SortMerge,    // sort merge join
+    T_Union,
     T_Sort,
     T_Aggregate,
     T_Limit,
     T_Projection,
+    T_Rename,
     T_Filter,       // 题目四：过滤节点（选择运算）
     T_explain       // 题目四：EXPLAIN ANALYZE
 } PlanTag;
@@ -151,6 +153,34 @@ class SortPlan : public Plan
         std::shared_ptr<Plan> subplan_;
         std::vector<OrderByTerm> order_bys_;
         
+};
+
+class RenamePlan : public Plan
+{
+    public:
+        RenamePlan(std::shared_ptr<Plan> subplan, std::vector<ColMeta> cols)
+        {
+            Plan::tag = T_Rename;
+            subplan_ = std::move(subplan);
+            cols_ = std::move(cols);
+        }
+        ~RenamePlan(){}
+        std::shared_ptr<Plan> subplan_;
+        std::vector<ColMeta> cols_;
+};
+
+class UnionPlan : public Plan
+{
+    public:
+        UnionPlan(std::vector<std::shared_ptr<Plan>> children, std::vector<ColMeta> output_cols)
+        {
+            Plan::tag = T_Union;
+            children_ = std::move(children);
+            output_cols_ = std::move(output_cols);
+        }
+        ~UnionPlan(){}
+        std::vector<std::shared_ptr<Plan>> children_;
+        std::vector<ColMeta> output_cols_;
 };
 
 class AggregatePlan : public Plan

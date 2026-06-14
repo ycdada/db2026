@@ -3,6 +3,7 @@
 #include "yacc.tab.h"
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 
 int yylex(YYSTYPE *yylval, YYLTYPE *yylloc);
 
@@ -21,7 +22,7 @@ using namespace ast;
 %define parse.error verbose
 
 // keywords
-%token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
+%token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY UNION
 WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
 EXPLAIN ANALYZE AS ON GROUP HAVING LIMIT COUNT MAX MIN SUM AVG
 // non-keywords
@@ -61,6 +62,7 @@ EXPLAIN ANALYZE AS ON GROUP HAVING LIMIT COUNT MAX MIN SUM AVG
 %type <sv_setKnobType> set_knob_type
 %type <sv_table_ref> tableRef
 %type <sv_from_clause> fromClause
+%type <sv_node> queryExpr selectStmt
 
 %%
 start:
@@ -167,7 +169,38 @@ dml:
     {
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
-    |   SELECT selector FROM fromClause optWhereClause opt_group_clause opt_having_clause opt_order_clause opt_limit_clause
+    |   queryExpr
+    {
+        $$ = $1;
+    }
+    |   EXPLAIN ANALYZE queryExpr
+    {
+        auto sel = std::dynamic_pointer_cast<SelectStmt>($3);
+        if (sel == nullptr) {
+            throw std::runtime_error("EXPLAIN ANALYZE only supports SELECT");
+        }
+        $$ = std::make_shared<ExplainStmt>(sel);
+    }
+    ;
+
+queryExpr:
+        selectStmt
+    {
+        $$ = $1;
+    }
+    |   queryExpr UNION selectStmt
+    {
+        if (auto u = std::dynamic_pointer_cast<UnionStmt>($1)) {
+            u->append($3);
+            $$ = u;
+        } else {
+            $$ = std::make_shared<UnionStmt>($1, $3);
+        }
+    }
+    ;
+
+selectStmt:
+        SELECT selector FROM fromClause optWhereClause opt_group_clause opt_having_clause opt_order_clause opt_limit_clause
     {
         std::vector<std::shared_ptr<Col>> legacy_cols;
         for (auto &item : $2) {
@@ -176,33 +209,15 @@ dml:
             }
         }
         auto sel = std::make_shared<SelectStmt>(legacy_cols, $2, std::vector<std::string>{}, $5, $8, $6, $7, $9);
+        sel->from_refs = $4->refs;
         for (auto &ref : $4->refs) {
             sel->tabs.push_back(ref->tab_name);
             sel->tab_alias.push_back(ref->alias);
         }
-        // 题目四：把 JOIN ... ON 收集到的连接条件并入 where 条件
         for (auto &c : $4->conds) {
             sel->conds.push_back(c);
         }
         $$ = sel;
-    }
-    |   EXPLAIN ANALYZE SELECT selector FROM fromClause optWhereClause opt_group_clause opt_having_clause opt_order_clause opt_limit_clause
-    {
-        std::vector<std::shared_ptr<Col>> legacy_cols;
-        for (auto &item : $4) {
-            if (auto c = std::dynamic_pointer_cast<Col>(item->expr)) {
-                legacy_cols.push_back(c);
-            }
-        }
-        auto sel = std::make_shared<SelectStmt>(legacy_cols, $4, std::vector<std::string>{}, $7, $10, $8, $9, $11);
-        for (auto &ref : $6->refs) {
-            sel->tabs.push_back(ref->tab_name);
-            sel->tab_alias.push_back(ref->alias);
-        }
-        for (auto &c : $6->conds) {
-            sel->conds.push_back(c);
-        }
-        $$ = std::make_shared<ExplainStmt>(sel);
     }
     ;
 
@@ -490,6 +505,14 @@ tableRef:
     |   tbName AS IDENTIFIER
     {
         $$ = std::make_shared<TableRef>($1, $3);
+    }
+    |   '(' queryExpr ')' AS IDENTIFIER
+    {
+        $$ = std::make_shared<TableRef>($2, $5);
+    }
+    |   '(' queryExpr ')' IDENTIFIER
+    {
+        $$ = std::make_shared<TableRef>($2, $4);
     }
     ;
 

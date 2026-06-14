@@ -84,6 +84,7 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
 "HELP" { return HELP; }
 "ORDER" { return ORDER; }
 "BY" {  return BY;  }
+"UNION" { return UNION; }
 "ASC" { return ASC; }
 "EXPLAIN" { return EXPLAIN; }
 "ANALYZE" { return ANALYZE; }
