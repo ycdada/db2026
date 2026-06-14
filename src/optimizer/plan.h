@@ -83,7 +83,10 @@ class ScanPlan : public Plan
         size_t len_;                               
         std::vector<Condition> fed_conds_;
         std::vector<std::string> index_col_names_;
-    
+        bool is_join_inner_ = false;
+        TabCol join_outer_col_;
+        std::string join_inner_col_;
+
 };
 
 class JoinPlan : public Plan

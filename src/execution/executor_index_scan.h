@@ -10,6 +10,7 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <algorithm>
 #include <limits>
 
 #include "execution_common.h"
@@ -36,6 +37,11 @@ class IndexScanExecutor : public AbstractExecutor {
     std::unique_ptr<RecScan> scan_;
 
     SmManager *sm_manager_;
+    bool is_join_inner_ = false;
+    bool join_key_bound_ = false;
+    TabCol join_outer_col_;
+    std::string join_inner_col_;
+    Value join_key_val_;
 
     void fill_min_key(char *key, int offset, const ColMeta &col) {
         if (col.type == TYPE_INT) {
@@ -71,9 +77,19 @@ class IndexScanExecutor : public AbstractExecutor {
         return res;
     }
 
+    const ColMeta &find_col(const std::vector<ColMeta> &cols, const std::string &tab_name, const std::string &col_name) {
+        auto pos = std::find_if(cols.begin(), cols.end(), [&](const ColMeta &col) {
+            return col.tab_name == tab_name && col.name == col_name;
+        });
+        if (pos == cols.end()) {
+            throw ColumnNotFoundError(tab_name + "." + col_name);
+        }
+        return *pos;
+    }
+
    public:
     IndexScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds, std::vector<std::string> index_col_names,
-                    Context *context) {
+                    Context *context, bool is_join_inner = false, TabCol join_outer_col = {}, std::string join_inner_col = "") {
         sm_manager_ = sm_manager;
         context_ = context;
         tab_name_ = std::move(tab_name);
@@ -85,6 +101,9 @@ class IndexScanExecutor : public AbstractExecutor {
         fh_ = sm_manager_->fhs_.at(tab_name_).get();
         cols_ = tab_.cols;
         len_ = cols_.back().offset + cols_.back().len;
+        is_join_inner_ = is_join_inner;
+        join_outer_col_ = std::move(join_outer_col);
+        join_inner_col_ = std::move(join_inner_col);
         std::map<CompOp, CompOp> swap_op = {
             {OP_EQ, OP_EQ}, {OP_NE, OP_NE}, {OP_LT, OP_GT}, {OP_GT, OP_LT}, {OP_LE, OP_GE}, {OP_GE, OP_LE},
         };
@@ -102,6 +121,19 @@ class IndexScanExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
+        fed_conds_ = conds_;
+        if (is_join_inner_) {
+            if (!join_key_bound_) {
+                scan_ = nullptr;
+                return;
+            }
+            Condition cond;
+            cond.lhs_col = {.tab_name = tab_name_, .col_name = join_inner_col_};
+            cond.op = OP_EQ;
+            cond.is_rhs_val = true;
+            cond.rhs_val = join_key_val_;
+            fed_conds_.push_back(cond);
+        }
         auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols)).get();
         std::vector<char> lower_key(index_meta_.col_tot_len);
         std::vector<char> upper_key(index_meta_.col_tot_len);
@@ -185,6 +217,7 @@ class IndexScanExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         if (scan_ == nullptr || scan_->is_end()) return nullptr;
+        rows_++;
         return fh_->get_record(rid_, context_);
     }
 
@@ -197,4 +230,36 @@ class IndexScanExecutor : public AbstractExecutor {
     size_t tupleLen() const override { return len_; }
 
     Rid &rid() override { return rid_; }
+
+    bool bind_join_key(const RmRecord &left_rec, const std::vector<ColMeta> &left_cols) override {
+        if (!is_join_inner_) return false;
+        const ColMeta &outer_col = find_col(left_cols, join_outer_col_.tab_name, join_outer_col_.col_name);
+        const ColMeta &inner_col = find_col(cols_, tab_name_, join_inner_col_);
+        const char *src = left_rec.data + outer_col.offset;
+        if (inner_col.type == TYPE_INT) {
+            join_key_val_.set_int(*(const int *)src);
+        } else if (inner_col.type == TYPE_FLOAT) {
+            join_key_val_.set_float(*(const float *)src);
+        } else {
+            std::string v(src, outer_col.len);
+            v.resize(strlen(v.c_str()));
+            join_key_val_.set_str(v);
+        }
+        join_key_val_.raw = nullptr;
+        join_key_val_.init_raw(inner_col.len);
+        join_key_bound_ = true;
+        return true;
+    }
+
+    void explain_print(int depth, std::string &out) override {
+        out += std::string(depth, '\t');
+        out += "Scan(table=" + tab_name_ + ", type=IndexScan, using_index=(";
+        for (size_t i = 0; i < index_col_names_.size(); i++) {
+            if (i) out += ", ";
+            out += index_col_names_[i];
+        }
+        out += "), rows=" + std::to_string(rows_) + ")\n";
+    }
+
+    void collect_tables(std::vector<std::string> &out) override { out.push_back(tab_name_); }
 };

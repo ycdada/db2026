@@ -1,6 +1,7 @@
 %{
 #include "ast.h"
 #include "yacc.tab.h"
+#include "errors.h"
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -55,7 +56,7 @@ EXPLAIN ANALYZE AS ON GROUP HAVING LIMIT COUNT MAX MIN SUM AVG
 %type <sv_set_clause> setClause
 %type <sv_set_clauses> setClauses
 %type <sv_cond> condition
-%type <sv_conds> whereClause optWhereClause
+%type <sv_conds> whereClause optWhereClause joinConds
 %type <sv_orderby>  order_clause opt_order_clause
 %type <sv_orderby_dir> opt_asc_desc
 %type <sv_int> opt_limit_clause
@@ -177,7 +178,7 @@ dml:
     {
         auto sel = std::dynamic_pointer_cast<SelectStmt>($3);
         if (sel == nullptr) {
-            throw std::runtime_error("EXPLAIN ANALYZE only supports SELECT");
+            throw RMDBError("failure");
         }
         $$ = std::make_shared<ExplainStmt>(sel);
     }
@@ -314,6 +315,17 @@ condition:
     {
         $$ = std::make_shared<BinaryExpr>(std::make_shared<Col>("", "__agg_in_where__"), $2,
                                           std::static_pointer_cast<Expr>(std::make_shared<IntLit>(0)));
+    }
+    ;
+
+joinConds:
+        condition
+    {
+        $$ = std::vector<std::shared_ptr<BinaryExpr>>{$1};
+    }
+    |   joinConds AND condition
+    {
+        $$.push_back($3);
     }
     ;
 
@@ -528,11 +540,13 @@ fromClause:
         $$ = $1;
         $$->refs.push_back($3);
     }
-    |   fromClause JOIN tableRef ON condition
+    |   fromClause JOIN tableRef ON joinConds
     {
         $$ = $1;
         $$->refs.push_back($3);
-        $$->conds.push_back($5);
+        for (auto &cond : $5) {
+            $$->conds.push_back(cond);
+        }
     }
     |   fromClause JOIN tableRef
     {

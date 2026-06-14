@@ -51,6 +51,8 @@ class AbstractExecutor {
 
     virtual std::unique_ptr<RmRecord> Next() = 0;
 
+    virtual bool bind_join_key(const RmRecord &, const std::vector<ColMeta> &) { return false; }
+
     virtual ColMeta get_col_offset(const TabCol &target) { return ColMeta();};
 
     std::vector<ColMeta>::const_iterator get_col(const std::vector<ColMeta> &rec_cols, const TabCol &target) {

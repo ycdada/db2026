@@ -74,6 +74,10 @@ class ProjectionExecutor : public AbstractExecutor {
 
     Rid &rid() override { return _abstract_rid; }
 
+    bool bind_join_key(const RmRecord &left_rec, const std::vector<ColMeta> &left_cols) override {
+        return prev_->bind_join_key(left_rec, left_cols);
+    }
+
     // 题目四：透传子树表名
     void collect_tables(std::vector<std::string> &out) override { prev_->collect_tables(out); }
 

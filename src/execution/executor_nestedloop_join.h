@@ -53,6 +53,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             left_->nextTuple();
             if (!left_->is_end()) {
                 left_rec_ = left_->Next();
+                right_->bind_join_key(*left_rec_, left_->cols());
                 right_->beginTuple();
             }
         }
@@ -79,6 +80,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         left_->beginTuple();
         if (!left_->is_end()) {
             left_rec_ = left_->Next();
+            right_->bind_join_key(*left_rec_, left_->cols());
             right_->beginTuple();
             advance_to_next_match();
         }

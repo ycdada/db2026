@@ -35,4 +35,8 @@ class RenameExecutor : public AbstractExecutor {
     size_t tupleLen() const override { return len_; }
 
     Rid &rid() override { return prev_->rid(); }
+
+    bool bind_join_key(const RmRecord &left_rec, const std::vector<ColMeta> &left_cols) override {
+        return prev_->bind_join_key(left_rec, left_cols);
+    }
 };
