@@ -24,6 +24,8 @@ class RenameExecutor : public AbstractExecutor {
 
     bool is_end() const override { return prev_->is_end(); }
 
+    void finish() override { prev_->finish(); }
+
     std::unique_ptr<RmRecord> Next() override {
         auto rec = prev_->Next();
         if (rec != nullptr) rows_++;

@@ -52,6 +52,8 @@ class ProjectionExecutor : public AbstractExecutor {
 
     bool is_end() const override { return prev_->is_end(); }
 
+    void finish() override { prev_->finish(); }
+
     std::unique_ptr<RmRecord> Next() override {
         if (prev_->is_end()) return nullptr;
         auto prev_rec = prev_->Next();

@@ -79,6 +79,12 @@ class UnionExecutor : public AbstractExecutor {
 
     bool is_end() const override { return pos_ >= tuples_.size(); }
 
+    void finish() override {
+        for (auto &child : children_) {
+            child->finish();
+        }
+    }
+
     std::unique_ptr<RmRecord> Next() override {
         if (is_end()) return nullptr;
         rows_++;

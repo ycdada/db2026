@@ -43,8 +43,8 @@ class UpdateExecutor : public AbstractExecutor {
             auto old_rec = fh_->get_record(rid, context_);
             auto new_rec = std::make_unique<RmRecord>(fh_->get_file_hdr().record_size, old_rec->data);
 
-            for (auto &set_clause : set_clauses_) {
-                const ColMeta *col_meta = nullptr;
+	            for (auto &set_clause : set_clauses_) {
+	                const ColMeta *col_meta = nullptr;
                 for (auto &col : tab_.cols) {
                     if (col.name == set_clause.lhs.col_name) {
                         col_meta = &col;
@@ -52,11 +52,17 @@ class UpdateExecutor : public AbstractExecutor {
                     }
                 }
                 if (!col_meta) continue;
-                memcpy(new_rec->data + col_meta->offset, set_clause.rhs.raw->data, col_meta->len);
-            }
+	                memcpy(new_rec->data + col_meta->offset, set_clause.rhs.raw->data, col_meta->len);
+	            }
 
-            for (auto &index : tab_.indexes) {
-                auto ih = sm_manager_->ihs_.at(
+	            bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+	                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
+	            if (mvcc) {
+	                context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *old_rec, context_->txn_);
+	            }
+
+	            for (auto &index : tab_.indexes) {
+	                auto ih = sm_manager_->ihs_.at(
                     sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
                 std::vector<char> new_key(index.col_tot_len);
                 int offset = 0;
@@ -72,6 +78,10 @@ class UpdateExecutor : public AbstractExecutor {
                     }
                 }
             }
+
+	            if (mvcc) {
+	                context_->txn_mgr_->MvccUpdate(tab_name_, rid, *old_rec, *new_rec, context_->txn_);
+	            }
 
             // 更新前，删除旧索引项
             for (size_t i = 0; i < tab_.indexes.size(); ++i) {

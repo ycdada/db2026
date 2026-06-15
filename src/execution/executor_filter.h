@@ -60,6 +60,8 @@ class FilterExecutor : public AbstractExecutor {
 
     bool is_end() const override { return is_end_; }
 
+    void finish() override { prev_->finish(); }
+
     std::unique_ptr<RmRecord> Next() override {
         if (is_end_ || cur_ == nullptr) return nullptr;
         rows_++;  // 题目四：统计过滤后输出行数

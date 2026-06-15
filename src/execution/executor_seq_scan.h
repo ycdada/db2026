@@ -29,11 +29,38 @@ class SeqScanExecutor : public AbstractExecutor {
 
     Rid rid_;
     std::unique_ptr<RecScan> scan_;     // table_iterator
+    std::unique_ptr<RmRecord> cur_rec_;
+    std::vector<Rid> returned_rids_;
+    bool ser_read_registered_ = false;
 
     SmManager *sm_manager_;
 
-   public:
-    SeqScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds, Context *context) {
+    void register_ser_read_once() {
+        if (!ser_read_registered_ && context_ != nullptr && context_->txn_mgr_ != nullptr) {
+            context_->txn_mgr_->RegisterSerializableRead(tab_name_, cols_, fed_conds_, returned_rids_, context_->txn_);
+            ser_read_registered_ = true;
+        }
+    }
+
+    bool load_visible_current() {
+        auto physical = fh_->get_record(scan_->rid(), context_);
+        std::unique_ptr<RmRecord> visible;
+        if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+            visible = context_->txn_mgr_->GetVisibleRecord(tab_name_, scan_->rid(), *physical, context_->txn_);
+        } else {
+            visible = std::move(physical);
+        }
+	        if (visible != nullptr && eval_conds(visible->data, cols_, fed_conds_)) {
+	            cur_rec_ = std::move(visible);
+	            rid_ = scan_->rid();
+	            returned_rids_.push_back(rid_);
+	            return true;
+	        }
+        return false;
+    }
+
+	   public:
+	    SeqScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds, Context *context) {
         sm_manager_ = sm_manager;
         tab_name_ = std::move(tab_name);
         conds_ = std::move(conds);
@@ -49,39 +76,43 @@ class SeqScanExecutor : public AbstractExecutor {
 
     void beginTuple() override {
         scan_ = std::make_unique<RmScan>(fh_);
+        returned_rids_.clear();
+        ser_read_registered_ = false;
+        cur_rec_ = nullptr;
         // 跳过不满足条件的记录
         while (!scan_->is_end()) {
-            auto rec = fh_->get_record(scan_->rid(), context_);
-            if (eval_conds(rec->data, cols_, fed_conds_)) {
-                rid_ = scan_->rid();
+            if (load_visible_current()) {
                 return;
             }
             scan_->next();
         }
+        register_ser_read_once();
     }
 
     void nextTuple() override {
         if (scan_ == nullptr) return;
         scan_->next();
+        cur_rec_ = nullptr;
         while (!scan_->is_end()) {
-            auto rec = fh_->get_record(scan_->rid(), context_);
-            if (eval_conds(rec->data, cols_, fed_conds_)) {
-                rid_ = scan_->rid();
+            if (load_visible_current()) {
                 return;
             }
             scan_->next();
         }
+        register_ser_read_once();
     }
 
     bool is_end() const override {
         return scan_ == nullptr || scan_->is_end();
     }
 
+    void finish() override { register_ser_read_once(); }
+
     std::unique_ptr<RmRecord> Next() override {
-        if (scan_ == nullptr || scan_->is_end()) return nullptr;
-        rows_++;  // 题目四：统计扫描到的行数
-        return fh_->get_record(rid_, context_);
-    }
+	        if (scan_ == nullptr || scan_->is_end()) return nullptr;
+	        rows_++;  // 题目四：统计扫描到的行数
+	        return std::make_unique<RmRecord>(*cur_rec_);
+	    }
 
     const std::vector<ColMeta> &cols() const override { return cols_; }
 

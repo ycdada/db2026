@@ -35,6 +35,7 @@ class IndexScanExecutor : public AbstractExecutor {
 
     Rid rid_;
     std::unique_ptr<RecScan> scan_;
+    std::unique_ptr<RmRecord> cur_rec_;
 
     SmManager *sm_manager_;
     bool is_join_inner_ = false;
@@ -192,9 +193,17 @@ class IndexScanExecutor : public AbstractExecutor {
                         : ih->leaf_end();
 
         scan_ = std::make_unique<IxScan>(ih, lower, upper, sm_manager_->get_bpm());
+        cur_rec_ = nullptr;
         while (!scan_->is_end()) {
-            auto rec = fh_->get_record(scan_->rid(), context_);
-            if (eval_conds(rec->data, cols_, fed_conds_)) {
+            auto physical = fh_->get_record(scan_->rid(), context_);
+            std::unique_ptr<RmRecord> rec;
+            if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+                rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, scan_->rid(), *physical, context_->txn_);
+            } else {
+                rec = std::move(physical);
+            }
+            if (rec != nullptr && eval_conds(rec->data, cols_, fed_conds_)) {
+                cur_rec_ = std::move(rec);
                 rid_ = scan_->rid();
                 return;
             }
@@ -205,9 +214,17 @@ class IndexScanExecutor : public AbstractExecutor {
     void nextTuple() override {
         if (scan_ == nullptr) return;
         scan_->next();
+        cur_rec_ = nullptr;
         while (!scan_->is_end()) {
-            auto rec = fh_->get_record(scan_->rid(), context_);
-            if (eval_conds(rec->data, cols_, fed_conds_)) {
+            auto physical = fh_->get_record(scan_->rid(), context_);
+            std::unique_ptr<RmRecord> rec;
+            if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+                rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, scan_->rid(), *physical, context_->txn_);
+            } else {
+                rec = std::move(physical);
+            }
+            if (rec != nullptr && eval_conds(rec->data, cols_, fed_conds_)) {
+                cur_rec_ = std::move(rec);
                 rid_ = scan_->rid();
                 return;
             }
@@ -218,7 +235,7 @@ class IndexScanExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> Next() override {
         if (scan_ == nullptr || scan_->is_end()) return nullptr;
         rows_++;
-        return fh_->get_record(rid_, context_);
+        return std::make_unique<RmRecord>(*cur_rec_);
     }
 
     bool is_end() const override {

@@ -15,6 +15,7 @@ See the Mulan PSL v2 for more details. */
 #include <optional>
 #include <functional>
 #include <shared_mutex>
+#include <set>
 
 #include "transaction.h"
 #include "watermark.h"
@@ -57,7 +58,8 @@ public:
     
     ~TransactionManager() = default;
 
-    Transaction* begin(Transaction* txn, LogManager* log_manager);
+    Transaction* begin(Transaction* txn, LogManager* log_manager,
+                       IsolationLevel isolation_level = IsolationLevel::READ_COMMITTED);
 
     void commit(Transaction* txn, LogManager* log_manager);
 
@@ -125,6 +127,24 @@ public:
     /** @brief 垃圾回收。仅在所有事务都未访问时调用。 */
     void GarbageCollection();
 
+    bool IsMvccTxn(Transaction *txn) const;
+    std::string MvccKey(const std::string &tab_name, const Rid &rid) const;
+    std::unique_ptr<RmRecord> GetVisibleRecord(const std::string &tab_name, const Rid &rid,
+                                               const RmRecord &physical, Transaction *txn);
+    bool IsVisible(const std::string &tab_name, const Rid &rid, const RmRecord &physical, Transaction *txn);
+	    void MvccInsert(const std::string &tab_name, const Rid &rid, const RmRecord &new_rec, Transaction *txn);
+	    Rid MvccInsertWithPhysical(const std::string &tab_name, const RmRecord &new_rec, Transaction *txn,
+	                               const std::function<Rid()> &insert_fn,
+	                               const std::function<void(const Rid &)> &rollback_fn);
+	    void CheckMvccWriteConflict(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
+	                                Transaction *txn);
+	    void MvccUpdate(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
+	                    const RmRecord &new_rec, Transaction *txn);
+    void MvccDelete(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec, Transaction *txn);
+    void RegisterSerializableRead(const std::string &tab_name, const std::vector<ColMeta> &cols,
+                                  const std::vector<Condition> &conds, const std::vector<Rid> &returned_rids,
+                                  Transaction *txn);
+
     struct PageVersionInfo {
         std::shared_mutex mutex_;
         /** 存储所有槽的先前版本信息。注意：不要使用 `[x]` 来访问它，因为
@@ -149,4 +169,65 @@ private:
 
     std::atomic<timestamp_t> last_commit_ts_{0};    // 最后提交的时间戳,仅用于MVCC
     Watermark running_txns_{0};             // 存储所有正在运行事务的读取时间戳，以便于垃圾回收，仅用于MVCC
-};
+
+    struct MvccVersion {
+        RmRecord record;
+        bool is_deleted = false;
+        timestamp_t commit_ts = 0;
+        txn_id_t writer_txn = INVALID_TXN_ID;
+
+        MvccVersion() = default;
+        MvccVersion(const RmRecord &record_, bool is_deleted_, timestamp_t commit_ts_, txn_id_t writer_txn_)
+            : record(record_), is_deleted(is_deleted_), commit_ts(commit_ts_), writer_txn(writer_txn_) {}
+    };
+
+    struct MvccEntry {
+        bool exists = false;
+        bool is_deleted = false;
+        timestamp_t commit_ts = 0;
+        txn_id_t writer_txn = INVALID_TXN_ID;
+        txn_id_t last_writer_txn = INVALID_TXN_ID;
+        std::string tab_name;
+        Rid rid{RM_NO_PAGE, RM_NO_PAGE};
+	        bool has_head_record = false;
+	        RmRecord head_record;
+	        std::vector<MvccVersion> undo_versions;
+	        bool rollback_delete_physical = false;
+	        bool rollback_restore_physical = false;
+	        RmRecord rollback_record;
+	        bool had_entry_on_abort = false;
+	        std::shared_ptr<MvccEntry> restore_snapshot;
+	    };
+
+    struct PredicateRead {
+        txn_id_t txn_id = INVALID_TXN_ID;
+        std::string tab_name;
+        std::vector<ColMeta> cols;
+        std::vector<Condition> conds;
+        std::set<std::string> record_keys;
+    };
+
+    std::mutex mvcc_latch_;
+	    std::unordered_map<std::string, MvccEntry> mvcc_versions_;
+	    std::unordered_map<txn_id_t, std::vector<PredicateRead>> serializable_reads_;
+	    std::set<std::pair<txn_id_t, txn_id_t>> rw_edges_;
+	    std::unordered_map<txn_id_t, std::set<txn_id_t>> rw_in_;
+	    std::unordered_map<txn_id_t, std::set<txn_id_t>> rw_out_;
+	    std::unordered_map<txn_id_t, timestamp_t> ser_txn_start_ts_;
+	    std::unordered_map<txn_id_t, timestamp_t> ser_txn_finish_ts_;
+
+	    MvccEntry &EnsureMvccEntryLocked(const std::string &tab_name, const Rid &rid,
+	                                     const RmRecord *physical = nullptr);
+	    std::optional<RmRecord> VisibleRecordLocked(const std::string &key, const MvccEntry &entry,
+	                                                const RmRecord &physical, Transaction *txn) const;
+	    void MvccInsertLocked(const std::string &tab_name, const Rid &rid, const RmRecord &new_rec, Transaction *txn);
+	    void PrepareWriteLocked(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
+	                            Transaction *txn, bool inserted_record);
+	    void CheckSerializableWriteLocked(const std::string &tab_name, const Rid &rid,
+	                                      const RmRecord *old_rec, const RmRecord *new_rec, Transaction *txn);
+	    void AddRwEdgeLocked(txn_id_t reader, txn_id_t writer, Transaction *current_txn);
+	    bool HasDangerousStructureLocked(txn_id_t pivot) const;
+	    void RememberSerializableTxnLocked(Transaction *txn);
+	    void CleanupSerializableStateLocked();
+	    void ClearTxnStateLocked(Transaction *txn);
+	};

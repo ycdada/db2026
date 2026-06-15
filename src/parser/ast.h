@@ -44,6 +44,10 @@ enum SetKnobType {
     EnableNestLoop, EnableSortMerge
 };
 
+enum IsolationLevelType {
+    SnapshotIsolation, Serializable
+};
+
 // Base class for tree nodes
 struct TreeNode {
     virtual ~TreeNode() = default;  // enable polymorphism
@@ -339,8 +343,14 @@ struct SetStmt : public TreeNode {
     SetKnobType set_knob_type_;
     bool bool_val_;
 
-    SetStmt(SetKnobType &type, bool bool_value) : 
+    SetStmt(SetKnobType &type, bool bool_value) :
         set_knob_type_(type), bool_val_(bool_value) { }
+};
+
+struct SetIsolationStmt : public TreeNode {
+    IsolationLevelType isolation_level_;
+
+    SetIsolationStmt(IsolationLevelType isolation_level) : isolation_level_(isolation_level) {}
 };
 
 // Semantic value
@@ -383,6 +393,7 @@ struct SemValue {
     std::shared_ptr<OrderBy> sv_orderby;
 
     SetKnobType sv_setKnobType;
+    IsolationLevelType sv_isolation_level;
 
     // 题目四：表引用（含别名）与 FROM 子句
     std::shared_ptr<TableRef> sv_table_ref;

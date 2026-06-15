@@ -323,7 +323,11 @@ std::shared_ptr<Plan> Planner::build_source_scan_plan(const QuerySource *source,
 
     std::vector<std::string> index_col_names;
     PlanTag tag = T_SeqScan;
-    if (is_join_inner) {
+    bool mvcc = context != nullptr && context->txn_mgr_ != nullptr &&
+                context->txn_mgr_->IsMvccTxn(context->txn_);
+    if (mvcc) {
+        index_col_names.clear();
+    } else if (is_join_inner) {
         index_col_names = {inner_col};
         tag = T_IndexScan;
     } else if (get_index_cols(table, conds, index_col_names)) {
@@ -517,8 +521,10 @@ std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> quer
 
         TabCol outer_col;
         std::string inner_col;
-        bool use_inlj = source != nullptr && !source->is_derived &&
-                        choose_inlj_key(sm_manager_, tab, joined, join_conds, outer_col, inner_col);
+	        bool mvcc = context != nullptr && context->txn_mgr_ != nullptr &&
+	                    context->txn_mgr_->IsMvccTxn(context->txn_);
+	        bool use_inlj = !mvcc && source != nullptr && !source->is_derived &&
+	                        choose_inlj_key(sm_manager_, tab, joined, join_conds, outer_col, inner_col);
 
         std::shared_ptr<Plan> leaf;
         if (source != nullptr && source->is_derived) {
@@ -620,7 +626,9 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         // 只有一张表，不需要进行物理优化了
         // int index_no = get_indexNo(x->tab_name, query->conds);
         std::vector<std::string> index_col_names;
-        bool index_exist = get_index_cols(x->tab_name, query->conds, index_col_names);
+        bool mvcc = context != nullptr && context->txn_mgr_ != nullptr &&
+                    context->txn_mgr_->IsMvccTxn(context->txn_);
+        bool index_exist = !mvcc && get_index_cols(x->tab_name, query->conds, index_col_names);
         
         if (index_exist == false) {  // 该表没有索引
             index_col_names.clear();
@@ -640,7 +648,9 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         // 只有一张表，不需要进行物理优化了
         // int index_no = get_indexNo(x->tab_name, query->conds);
         std::vector<std::string> index_col_names;
-        bool index_exist = get_index_cols(x->tab_name, query->conds, index_col_names);
+        bool mvcc = context != nullptr && context->txn_mgr_ != nullptr &&
+                    context->txn_mgr_->IsMvccTxn(context->txn_);
+        bool index_exist = !mvcc && get_index_cols(x->tab_name, query->conds, index_col_names);
 
         if (index_exist == false) {  // 该表没有索引
         index_col_names.clear();

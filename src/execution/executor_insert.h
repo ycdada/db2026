@@ -69,7 +69,16 @@ class InsertExecutor : public AbstractExecutor {
             }
         }
         // Insert into record file
-        rid_ = fh_->insert_record(rec.data, context_);
+        bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                    context_->txn_mgr_->IsMvccTxn(context_->txn_);
+        if (mvcc) {
+            rid_ = context_->txn_mgr_->MvccInsertWithPhysical(
+                tab_name_, rec, context_->txn_,
+                [&]() { return fh_->insert_record(rec.data, context_); },
+                [&](const Rid &rid) { fh_->delete_record(rid, context_); });
+        } else {
+            rid_ = fh_->insert_record(rec.data, context_);
+        }
         
         // Insert into index
         for(auto &index : tab_.indexes) {

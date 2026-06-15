@@ -98,6 +98,11 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
 "MIN" { return MIN; }
 "SUM" { return SUM; }
 "AVG" { return AVG; }
+"TRANSACTION" { return TRANSACTION; }
+"ISOLATION" { return ISOLATION; }
+"LEVEL" { return LEVEL; }
+"SNAPSHOT" { return SNAPSHOT; }
+"SERIALIZABLE" { return SERIALIZABLE; }
 "ENABLE_NESTLOOP" { return ENABLE_NESTLOOP; }
 "ENABLE_SORTMERGE" { return ENABLE_SORTMERGE; }
 "TRUE" { 

@@ -163,6 +163,9 @@ private:
             std::cout << "ABORT\n";
         } else if (auto x = std::dynamic_pointer_cast<TxnRollback>(node)) {
             std::cout << "ROLLBACK\n";
+        } else if (auto x = std::dynamic_pointer_cast<SetIsolationStmt>(node)) {
+            std::cout << "SET_ISOLATION\n";
+            print_val(x->isolation_level_ == SnapshotIsolation ? "SNAPSHOT ISOLATION" : "SERIALIZABLE", offset);
         } else {
             assert(0);
         }

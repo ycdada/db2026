@@ -13,6 +13,7 @@ See the Mulan PSL v2 for more details. */
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -56,8 +57,9 @@ struct UndoLog {
 
 class Transaction {
    public:
-    explicit Transaction(txn_id_t txn_id, IsolationLevel isolation_level = IsolationLevel::SERIALIZABLE)
-        : state_(TransactionState::DEFAULT), isolation_level_(isolation_level), txn_id_(txn_id) {
+    explicit Transaction(txn_id_t txn_id, IsolationLevel isolation_level = IsolationLevel::READ_COMMITTED)
+        : txn_mode_(false), state_(TransactionState::DEFAULT), isolation_level_(isolation_level),
+          txn_id_(txn_id), start_ts_(0) {
         write_set_ = std::make_shared<std::deque<WriteRecord *>>();
         lock_set_ = std::make_shared<std::unordered_set<LockDataId>>();
         index_latch_page_set_ = std::make_shared<std::deque<Page *>>();
@@ -78,7 +80,9 @@ class Transaction {
     inline void set_start_ts(timestamp_t start_ts) { start_ts_ = start_ts; }
     inline timestamp_t get_start_ts() { return start_ts_; }
 
-    inline IsolationLevel get_isolation_level() { return isolation_level_; }
+	    inline IsolationLevel get_isolation_level() { return isolation_level_; }
+	    inline void set_mvcc_enabled(bool mvcc_enabled) { mvcc_enabled_ = mvcc_enabled; }
+	    inline bool is_mvcc() const { return mvcc_enabled_; }
 
     inline TransactionState get_state() { return state_; }
     inline void set_state(TransactionState state) { state_ = state; }
@@ -99,6 +103,11 @@ class Transaction {
 
     inline timestamp_t get_read_ts() const { return read_ts_; }
     inline timestamp_t get_commit_ts() const { return commit_ts_; }
+    inline void set_read_ts(timestamp_t read_ts) { read_ts_ = read_ts; }
+    inline void set_commit_ts(timestamp_t commit_ts) { commit_ts_ = commit_ts; }
+
+    inline void add_mvcc_write_key(const std::string &key) { mvcc_write_keys_.insert(key); }
+    inline const std::set<std::string> &mvcc_write_keys() const { return mvcc_write_keys_; }
 
     /** 修改现有的撤销日志 */
     inline auto ModifyUndoLog(int log_idx, UndoLog new_log) {
@@ -127,7 +136,8 @@ class Transaction {
    private:
     bool txn_mode_;                   // 用于标识当前事务为显式事务还是单条SQL语句的隐式事务
     TransactionState state_;          // 事务状态
-    IsolationLevel isolation_level_;  // 事务的隔离级别，默认隔离级别为可串行化
+	    IsolationLevel isolation_level_;  // 事务的隔离级别，默认隔离级别为可串行化
+	    bool mvcc_enabled_ = false;
     std::thread::id thread_id_;       // 当前事务对应的线程id
     lsn_t prev_lsn_;                  // 当前事务执行的最后一条操作对应的lsn，用于系统故障恢复
     txn_id_t txn_id_;                 // 事务的ID，唯一标识符
@@ -148,4 +158,5 @@ class Transaction {
   std::vector<UndoLog> undo_logs_;
   /** 用于访问事务级撤销日志的锁。 */
   std::mutex latch_;
+  std::set<std::string> mvcc_write_keys_;
 };

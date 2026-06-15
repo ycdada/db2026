@@ -47,6 +47,8 @@ class AbstractExecutor {
 
     virtual bool is_end() const { return true; };
 
+    virtual void finish() {}
+
     virtual Rid &rid() = 0;
 
     virtual std::unique_ptr<RmRecord> Next() = 0;

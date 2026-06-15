@@ -29,6 +29,8 @@ class LimitExecutor : public AbstractExecutor {
         return emitted_ >= limit_ || prev_->is_end();
     }
 
+    void finish() override { prev_->finish(); }
+
     std::unique_ptr<RmRecord> Next() override {
         if (is_end()) return nullptr;
         emitted_++;

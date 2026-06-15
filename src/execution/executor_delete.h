@@ -41,6 +41,12 @@ class DeleteExecutor : public AbstractExecutor {
         for (auto &rid : rids_) {
             // 获取记录以用于删除索引
             auto rec = fh_->get_record(rid, context_);
+            bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
+            if (mvcc) {
+                context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *rec, context_->txn_);
+                context_->txn_mgr_->MvccDelete(tab_name_, rid, *rec, context_->txn_);
+            }
             // 删除索引项
             for (size_t i = 0; i < tab_.indexes.size(); ++i) {
                 auto &index = tab_.indexes[i];
@@ -54,8 +60,10 @@ class DeleteExecutor : public AbstractExecutor {
                 }
                 ih->delete_entry(key.data(), context_->txn_);
             }
-            // 删除记录
-            fh_->delete_record(rid, context_);
+            // MVCC 删除保留物理槽位，旧快照仍可通过版本目录读到旧值。
+            if (!mvcc) {
+                fh_->delete_record(rid, context_);
+            }
             if (context_->txn_ != nullptr) {
                 context_->txn_->append_write_record(new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec));
             }

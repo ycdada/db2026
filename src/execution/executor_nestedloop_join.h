@@ -95,6 +95,11 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
 
     bool is_end() const override { return isend; }
 
+    void finish() override {
+        left_->finish();
+        right_->finish();
+    }
+
     std::unique_ptr<RmRecord> Next() override {
         // 拼接当前匹配的左、右记录
         auto rec = std::make_unique<RmRecord>(len_);

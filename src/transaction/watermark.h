@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #pragma once
 
 #include <map>
+#include <mutex>
 #include <unordered_map>
 
 #include "transaction/transaction.h"
@@ -31,11 +32,14 @@ public:
   /** 调用者应在从水印中移除事务之前更新提交时间戳，以便我们能够正确跟踪水印。 */
   void UpdateCommitTs(timestamp_t commit_ts);
 
-  timestamp_t GetWatermark();
+	  timestamp_t GetWatermark();
 
   mutable timestamp_t commit_ts_;
 
   timestamp_t watermark_;
 
-  std::map<timestamp_t, int> current_reads_;
-};
+	  std::map<timestamp_t, int> current_reads_;
+
+private:
+  mutable std::mutex latch_;
+	};

@@ -145,11 +145,25 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
             break;
         }
         }
+    } else if(auto x = std::dynamic_pointer_cast<SetIsolationPlan>(plan)) {
+        if (context->session_isolation_level_ == nullptr) {
+            throw RMDBError("failure");
+        }
+        switch (x->isolation_level_) {
+        case ast::IsolationLevelType::SnapshotIsolation:
+            *context->session_isolation_level_ = IsolationLevel::SNAPSHOT_ISOLATION;
+            break;
+        case ast::IsolationLevelType::Serializable:
+            *context->session_isolation_level_ = IsolationLevel::SERIALIZABLE;
+            break;
+        default:
+            throw RMDBError("failure");
+        }
     }
 }
 
 // 执行select语句，select语句的输出除了需要返回客户端外，还需要写入output.txt文件中
-void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, std::vector<TabCol> sel_cols, 
+void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, std::vector<TabCol> sel_cols,
                             Context *context) {
     std::vector<std::string> captions;
     captions.reserve(sel_cols.size());
@@ -157,23 +171,7 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
         captions.push_back(sel_col.col_name);
     }
 
-    // Print header into buffer
-    RecordPrinter rec_printer(sel_cols.size());
-    rec_printer.print_separator(context);
-    rec_printer.print_record(captions, context);
-    rec_printer.print_separator(context);
-    // print header into file
-    std::fstream outfile;
-    outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-    outfile << "|";
-    for(int i = 0; i < captions.size(); ++i) {
-        outfile << " " << captions[i] << " |";
-    }
-    outfile << "\n";
-
-    // Print records
-    size_t num_rec = 0;
-    // 执行query_plan
+    std::vector<std::vector<std::string>> rows;
     for (executorTreeRoot->beginTuple(); !executorTreeRoot->is_end(); executorTreeRoot->nextTuple()) {
         auto Tuple = executorTreeRoot->Next();
         std::vector<std::string> columns;
@@ -190,6 +188,26 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
             }
             columns.push_back(col_str);
         }
+        rows.push_back(std::move(columns));
+    }
+    executorTreeRoot->finish();
+
+    // Print header into buffer
+    RecordPrinter rec_printer(sel_cols.size());
+    rec_printer.print_separator(context);
+    rec_printer.print_record(captions, context);
+    rec_printer.print_separator(context);
+    // print header into file
+    std::fstream outfile;
+    outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+    outfile << "|";
+    for(int i = 0; i < captions.size(); ++i) {
+        outfile << " " << captions[i] << " |";
+    }
+    outfile << "\n";
+
+    // Print records
+    for (auto &columns : rows) {
         // print record into buffer
         rec_printer.print_record(columns, context);
         // print record into file
@@ -198,13 +216,12 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
             outfile << " " << columns[i] << " |";
         }
         outfile << "\n";
-        num_rec++;
     }
     outfile.close();
     // Print footer into buffer
     rec_printer.print_separator(context);
     // Print record count into buffer
-    RecordPrinter::print_record_count(num_rec, context);
+    RecordPrinter::print_record_count(rows.size(), context);
 }
 
 // 执行DML语句
@@ -218,6 +235,7 @@ void QlManager::run_explain(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     for (executorTreeRoot->beginTuple(); !executorTreeRoot->is_end(); executorTreeRoot->nextTuple()) {
         executorTreeRoot->Next();
     }
+    executorTreeRoot->finish();
     // 生成计划树文本
     std::string out;
     executorTreeRoot->explain_print(0, out);
