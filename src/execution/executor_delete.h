@@ -40,9 +40,16 @@ class DeleteExecutor : public AbstractExecutor {
         // 遍历 rids_，删除每条记录及其索引项
         for (auto &rid : rids_) {
             // 获取记录以用于删除索引
-            auto rec = fh_->get_record(rid, context_);
+            auto physical = fh_->get_record(rid, context_);
             bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                         context_->txn_mgr_->IsMvccTxn(context_->txn_);
+            std::unique_ptr<RmRecord> rec;
+            if (mvcc) {
+                rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, rid, *physical, context_->txn_);
+                if (rec == nullptr) continue;
+            } else {
+                rec = std::move(physical);
+            }
             if (mvcc) {
                 context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *rec, context_->txn_);
                 context_->txn_mgr_->MvccDelete(tab_name_, rid, *rec, context_->txn_);

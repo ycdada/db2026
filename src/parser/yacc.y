@@ -343,7 +343,7 @@ optWhereClause:
     ;
 
 whereClause:
-        condition 
+        condition
     {
         $$ = std::vector<std::shared_ptr<BinaryExpr>>{$1};
     }
@@ -561,16 +561,16 @@ fromClause:
     ;
 
 opt_order_clause:
-    ORDER BY order_clause      
-    { 
-        $$ = $3; 
+    ORDER BY order_clause
+    {
+        $$ = $3;
     }
     |   /* epsilon */ { /* ignore*/ }
     ;
 
 order_clause:
-      col  opt_asc_desc 
-    { 
+      col  opt_asc_desc
+    {
         $$ = std::make_shared<OrderBy>($1, $2);
     }
     | order_clause ',' col opt_asc_desc
@@ -578,13 +578,13 @@ order_clause:
         $$ = $1;
         $$->append($3, $4);
     }
-    ;   
+    ;
 
 opt_asc_desc:
     ASC          { $$ = OrderBy_ASC;     }
     |  DESC      { $$ = OrderBy_DESC;    }
     |       { $$ = OrderBy_DEFAULT; }
-    ;    
+    ;
 
 opt_group_clause:
         /* epsilon */ { $$ = {}; }
@@ -655,6 +655,7 @@ set_knob_type:
 
 isolation_level:
         SNAPSHOT ISOLATION { $$ = SnapshotIsolation; }
+    |   SNAPSHOT { $$ = SnapshotIsolation; }
     |   SERIALIZABLE { $$ = Serializable; }
     ;
 

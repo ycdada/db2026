@@ -55,6 +55,11 @@ class InsertExecutor : public AbstractExecutor {
             val.init_raw(col.len);
             memcpy(rec.data + col.offset, val.raw->data, col.len);
         }
+        bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                    context_->txn_mgr_->IsMvccTxn(context_->txn_);
+        if (mvcc) {
+            context_->txn_mgr_->CheckMvccInsertConflict(tab_name_, rec, context_->txn_);
+        }
         for (auto &index : tab_.indexes) {
             auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
             std::vector<char> key(index.col_tot_len);
@@ -69,8 +74,6 @@ class InsertExecutor : public AbstractExecutor {
             }
         }
         // Insert into record file
-        bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                    context_->txn_mgr_->IsMvccTxn(context_->txn_);
         if (mvcc) {
             rid_ = context_->txn_mgr_->MvccInsertWithPhysical(
                 tab_name_, rec, context_->txn_,
@@ -79,20 +82,40 @@ class InsertExecutor : public AbstractExecutor {
         } else {
             rid_ = fh_->insert_record(rec.data, context_);
         }
-        
-        // Insert into index
-        for(auto &index : tab_.indexes) {
-            auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-            std::vector<char> key(index.col_tot_len);
-            int offset = 0;
-            for(int i = 0; i < index.col_num; ++i) {
-                memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
-                offset += index.cols[i].len;
-            }
-            ih->insert_entry(key.data(), rid_, context_->txn_);
-        }
         if (context_->txn_ != nullptr) {
             context_->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_));
+        }
+
+        // Insert into index
+        try {
+            for(auto &index : tab_.indexes) {
+                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                std::vector<char> key(index.col_tot_len);
+                int offset = 0;
+                for(int i = 0; i < index.col_num; ++i) {
+                    memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
+                    offset += index.cols[i].len;
+                }
+                ih->insert_entry(key.data(), rid_, context_->txn_);
+            }
+        } catch (...) {
+            if (mvcc) {
+                context_->txn_mgr_->abort(context_->txn_, context_->log_mgr_);
+            } else {
+                for (auto &index : tab_.indexes) {
+                    auto ih = sm_manager_->ihs_.at(
+                        sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                    std::vector<char> key(index.col_tot_len);
+                    int offset = 0;
+                    for (int i = 0; i < index.col_num; ++i) {
+                        memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
+                        offset += index.cols[i].len;
+                    }
+                    ih->delete_entry(key.data(), context_->txn_);
+                }
+                fh_->delete_record(rid_, context_);
+            }
+            throw;
         }
         return nullptr;
     }

@@ -133,6 +133,9 @@ public:
                                                const RmRecord &physical, Transaction *txn);
     bool IsVisible(const std::string &tab_name, const Rid &rid, const RmRecord &physical, Transaction *txn);
 	    void MvccInsert(const std::string &tab_name, const Rid &rid, const RmRecord &new_rec, Transaction *txn);
+	    void CheckMvccInsertConflict(const std::string &tab_name, const RmRecord &new_rec, Transaction *txn);
+	    void CheckMvccUniqueConflict(const std::string &tab_name, const RmRecord &new_rec, Transaction *txn,
+	                                 const Rid *self_rid = nullptr);
 	    Rid MvccInsertWithPhysical(const std::string &tab_name, const RmRecord &new_rec, Transaction *txn,
 	                               const std::function<Rid()> &insert_fn,
 	                               const std::function<void(const Rid &)> &rollback_fn);

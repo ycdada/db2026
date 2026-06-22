@@ -27,6 +27,7 @@ int main() {
         "delete from tb where a = 1;",
         "update tb set a = 1, b = 2.2, c = 'xyz' where x = 2 and y < 1.1 and z > 'abc';",
         "set transaction isolation level snapshot isolation;",
+        "set transaction isolation level snapshot;",
         "set transaction isolation level serializable;",
         "select * from tb;",
         "select * from tb where x <> 2 and y >= 3. and z <= '123' and b < tb.a;",

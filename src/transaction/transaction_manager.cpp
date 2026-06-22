@@ -324,7 +324,22 @@ bool TransactionManager::HasDangerousStructureLocked(txn_id_t pivot) const {
     if (in == rw_in_.end() || out == rw_out_.end()) {
         return false;
     }
-    return !in->second.empty() && !out->second.empty();
+    for (txn_id_t tin : in->second) {
+        for (txn_id_t tout : out->second) {
+            if (tin == tout) {
+                return true;
+            }
+            auto tout_finish = ser_txn_finish_ts_.find(tout);
+            if (tout_finish == ser_txn_finish_ts_.end()) {
+                continue;
+            }
+            auto tin_finish = ser_txn_finish_ts_.find(tin);
+            if (tin_finish == ser_txn_finish_ts_.end() || tout_finish->second < tin_finish->second) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 void TransactionManager::RememberSerializableTxnLocked(Transaction *txn) {
@@ -397,6 +412,56 @@ void TransactionManager::MvccInsert(const std::string &tab_name, const Rid &rid,
     if (!IsMvccTxn(txn)) return;
     std::scoped_lock<std::mutex> lock(mvcc_latch_);
     MvccInsertLocked(tab_name, rid, new_rec, txn);
+}
+
+void TransactionManager::CheckMvccUniqueConflict(const std::string &tab_name, const RmRecord &new_rec,
+                                                 Transaction *txn, const Rid *self_rid) {
+    if (!IsMvccTxn(txn)) return;
+    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    const TabMeta &tab = sm_manager_->db_.get_table(tab_name);
+    for (auto &entry_pair : mvcc_versions_) {
+        auto &entry = entry_pair.second;
+        if (self_rid != nullptr && entry.rid.page_no == self_rid->page_no && entry.rid.slot_no == self_rid->slot_no) {
+            continue;
+        }
+        if (entry.tab_name != tab_name || !entry.has_head_record || entry.last_writer_txn == txn->get_transaction_id()) {
+            continue;
+        }
+        bool conflicts_with_snapshot = entry.writer_txn != INVALID_TXN_ID || entry.commit_ts > txn->get_start_ts();
+        if (!conflicts_with_snapshot) {
+            continue;
+        }
+        bool has_live_version = entry.exists && !entry.is_deleted;
+        for (auto it = entry.undo_versions.rbegin(); !has_live_version && it != entry.undo_versions.rend(); ++it) {
+            has_live_version = !it->is_deleted;
+        }
+        if (!has_live_version) {
+            continue;
+        }
+        for (auto &index : tab.indexes) {
+            auto new_key = make_index_key(new_rec, index);
+            if (entry.exists && !entry.is_deleted) {
+                auto old_key = make_index_key(entry.head_record, index);
+                if (memcmp(new_key.data(), old_key.data(), index.col_tot_len) == 0) {
+                    throw TransactionAbortException(txn->get_transaction_id(), AbortReason::MVCC_CONFLICT);
+                }
+            }
+            for (auto &version : entry.undo_versions) {
+                if (version.is_deleted) {
+                    continue;
+                }
+                auto old_key = make_index_key(version.record, index);
+                if (memcmp(new_key.data(), old_key.data(), index.col_tot_len) == 0) {
+                    throw TransactionAbortException(txn->get_transaction_id(), AbortReason::MVCC_CONFLICT);
+                }
+            }
+        }
+    }
+}
+
+void TransactionManager::CheckMvccInsertConflict(const std::string &tab_name, const RmRecord &new_rec,
+                                                 Transaction *txn) {
+    CheckMvccUniqueConflict(tab_name, new_rec, txn, nullptr);
 }
 
 Rid TransactionManager::MvccInsertWithPhysical(const std::string &tab_name, const RmRecord &new_rec, Transaction *txn,

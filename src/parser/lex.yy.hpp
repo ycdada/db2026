@@ -2,9 +2,9 @@
 #define yyHEADER_H 1
 #define yyIN_HEADER 1
 
-#line 5 "lex.yy.hpp"
+#line 6 "src/parser/lex.yy.hpp"
 
-#line 7 "lex.yy.hpp"
+#line 8 "src/parser/lex.yy.hpp"
 
 #define  YY_INT_ALIGNED short int
 
@@ -62,7 +62,7 @@
 #if defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
 
 /* C99 says to define __STDC_LIMIT_MACROS before including stdint.h,
- * if you want the limit (max/min) macros for int types. 
+ * if you want the limit (max/min) macros for int types.
  */
 #ifndef __STDC_LIMIT_MACROS
 #define __STDC_LIMIT_MACROS 1
@@ -79,7 +79,7 @@ typedef uint32_t flex_uint32_t;
 typedef signed char flex_int8_t;
 typedef short int flex_int16_t;
 typedef int flex_int32_t;
-typedef unsigned char flex_uint8_t; 
+typedef unsigned char flex_uint8_t;
 typedef unsigned short int flex_uint16_t;
 typedef unsigned int flex_uint32_t;
 
@@ -225,7 +225,7 @@ void *yyalloc ( yy_size_t  );
 void *yyrealloc ( void *, yy_size_t  );
 void yyfree ( void *  );
 
-/* begin user sect3 */
+/* Begin user sect3 */
 
 #define yywrap() (/*CONSTCOND*/1)
 #define YY_SKIP_YYWRAP
@@ -290,9 +290,9 @@ YYSTYPE * yyget_lval ( void );
 void yyset_lval ( YYSTYPE * yylval_param  );
 
        YYLTYPE *yyget_lloc ( void );
-    
+
         void yyset_lloc ( YYLTYPE * yylloc_param  );
-    
+
 /* Macros after this point can all be overridden by user definitions in
  * section 1.
  */
@@ -504,9 +504,9 @@ extern int yylex \
 #undef yyTABLES_NAME
 #endif
 
-#line 116 "lex.l"
+#line 144 "src/parser/lex.l"
 
 
-#line 510 "lex.yy.hpp"
+#line 511 "src/parser/lex.yy.hpp"
 #undef yyIN_HEADER
 #endif /* yyHEADER_H */

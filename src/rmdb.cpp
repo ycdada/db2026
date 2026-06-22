@@ -55,15 +55,42 @@ void sigint_handler(int signo) {
     longjmp(jmpbuf, 1);
 }
 
-// 判断当前正在执行的是显式事务还是单条SQL语句的事务，并更新事务ID
-void SetTransaction(txn_id_t *txn_id, Context *context, IsolationLevel session_isolation_level) {
+static bool is_transaction_control_query(const std::shared_ptr<Query> &query) {
+    return std::dynamic_pointer_cast<ast::TxnBegin>(query->parse) != nullptr ||
+           std::dynamic_pointer_cast<ast::TxnCommit>(query->parse) != nullptr ||
+           std::dynamic_pointer_cast<ast::TxnAbort>(query->parse) != nullptr ||
+           std::dynamic_pointer_cast<ast::TxnRollback>(query->parse) != nullptr;
+}
+
+static bool is_session_only_query(const std::shared_ptr<Query> &query) {
+    return std::dynamic_pointer_cast<ast::SetIsolationStmt>(query->parse) != nullptr ||
+           std::dynamic_pointer_cast<ast::SetStmt>(query->parse) != nullptr;
+}
+
+static bool query_needs_transaction(const std::shared_ptr<Query> &query) {
+    return !is_transaction_control_query(query) && !is_session_only_query(query);
+}
+
+static void EnsureStatementTransaction(txn_id_t *txn_id, Context *context,
+                                       IsolationLevel session_isolation_level) {
     context->txn_ = txn_manager->get_transaction(*txn_id);
-    if(context->txn_ == nullptr || context->txn_->get_state() == TransactionState::COMMITTED ||
+    if (context->txn_ == nullptr || context->txn_->get_state() == TransactionState::COMMITTED ||
         context->txn_->get_state() == TransactionState::ABORTED) {
         context->txn_ = txn_manager->begin(nullptr, context->log_mgr_, session_isolation_level);
         *txn_id = context->txn_->get_transaction_id();
         context->txn_->set_txn_mode(false);
     }
+}
+
+static void AbortImplicitStatementTransaction(txn_id_t *txn_id, Context *context) {
+    if (context->txn_ == nullptr || context->txn_->get_txn_mode() ||
+        context->txn_->get_state() == TransactionState::COMMITTED ||
+        context->txn_->get_state() == TransactionState::ABORTED) {
+        return;
+    }
+    txn_manager->abort(context->txn_, context->log_mgr_);
+    *txn_id = INVALID_TXN_ID;
+    context->txn_ = nullptr;
 }
 
 void *client_handler(void *sock_fd) {
@@ -98,7 +125,7 @@ void *client_handler(void *sock_fd) {
             std::cout << "Client read error!" << std::endl;
             break;
         }
-        
+
         printf("i_recvBytes: %d \n ", i_recvBytes);
 
         if (strcmp(data_recv, "exit") == 0) {
@@ -118,7 +145,6 @@ void *client_handler(void *sock_fd) {
         // 开启事务，初始化系统所需的上下文信息（包括事务对象指针、锁管理器指针、日志管理器指针、存放结果的buffer、记录结果长度的变量）
         Context *context = new Context(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset,
                                        txn_manager.get(), &session_isolation_level);
-        SetTransaction(&txn_id, context, session_isolation_level);
 
         // 用于判断是否已经调用了yy_delete_buffer来删除buf
         bool finish_analyze = false;
@@ -132,6 +158,9 @@ void *client_handler(void *sock_fd) {
                     yy_delete_buffer(buf);
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
+                    if (query_needs_transaction(query)) {
+                        EnsureStatementTransaction(&txn_id, context, session_isolation_level);
+                    }
                     // 优化器
                     std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
                     // portal
@@ -147,6 +176,8 @@ void *client_handler(void *sock_fd) {
 
                     // 回滚事务
                     txn_manager->abort(context->txn_, log_manager.get());
+                    txn_id = INVALID_TXN_ID;
+                    context->txn_ = nullptr;
                     std::cout << e.GetInfo() << std::endl;
 
                     std::fstream outfile;
@@ -156,6 +187,7 @@ void *client_handler(void *sock_fd) {
                 } catch (RMDBError &e) {
                     // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
                     std::cerr << e.what() << std::endl;
+                    AbortImplicitStatementTransaction(&txn_id, context);
 
                     memcpy(data_send, e.what(), e.get_msg_len());
                     data_send[e.get_msg_len()] = '\n';
@@ -190,11 +222,12 @@ void *client_handler(void *sock_fd) {
             break;
         }
         // 如果是单挑语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务
-        if(context->txn_->get_txn_mode() == false &&
+        if(context->txn_ != nullptr && context->txn_->get_txn_mode() == false &&
            context->txn_->get_state() != TransactionState::COMMITTED &&
            context->txn_->get_state() != TransactionState::ABORTED)
         {
             txn_manager->commit(context->txn_, context->log_mgr_);
+            txn_id = INVALID_TXN_ID;
         }
     }
 
@@ -256,7 +289,7 @@ void start_server() {
             std::cout << "Accept error!" << std::endl;
             continue;  // ignore current socket ,continue while loop.
         }
-        
+
         // 和客户端建立连接，并开启一个线程负责处理客户端请求
         if (pthread_create(&thread_id, nullptr, &client_handler, (void *)(&sockfd)) != 0) {
             std::cout << "Create thread fail!" << std::endl;
@@ -308,7 +341,7 @@ int main(int argc, char **argv) {
         recovery->analyze();
         recovery->redo();
         recovery->undo();
-        
+
         // 开启服务端，开始接受客户端连接
         start_server();
     } catch (RMDBError &e) {

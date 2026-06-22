@@ -70,7 +70,7 @@ void QlManager::run_mutli_query(std::shared_ptr<Plan> plan, Context *context){
             }
             default:
                 throw InternalError("Unexpected field type");
-                break;  
+                break;
         }
     }
 }
@@ -102,31 +102,58 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
             }
             case T_Transaction_begin:
             {
-                // 显示开启一个事务
+                if (context->session_isolation_level_ == nullptr) {
+                    throw RMDBError("failure");
+                }
+                if (context->txn_ != nullptr &&
+                    context->txn_->get_state() != TransactionState::COMMITTED &&
+                    context->txn_->get_state() != TransactionState::ABORTED) {
+                    break;
+                }
+                context->txn_ = txn_mgr_->begin(nullptr, context->log_mgr_, *context->session_isolation_level_);
                 context->txn_->set_txn_mode(true);
+                *txn_id = context->txn_->get_transaction_id();
                 break;
-            }  
+            }
             case T_Transaction_commit:
             {
                 context->txn_ = txn_mgr_->get_transaction(*txn_id);
-                txn_mgr_->commit(context->txn_, context->log_mgr_);
+                if (context->txn_ != nullptr &&
+                    context->txn_->get_state() != TransactionState::COMMITTED &&
+                    context->txn_->get_state() != TransactionState::ABORTED) {
+                    txn_mgr_->commit(context->txn_, context->log_mgr_);
+                }
+                *txn_id = INVALID_TXN_ID;
+                context->txn_ = nullptr;
                 break;
-            }    
+            }
             case T_Transaction_rollback:
             {
                 context->txn_ = txn_mgr_->get_transaction(*txn_id);
-                txn_mgr_->abort(context->txn_, context->log_mgr_);
+                if (context->txn_ != nullptr &&
+                    context->txn_->get_state() != TransactionState::COMMITTED &&
+                    context->txn_->get_state() != TransactionState::ABORTED) {
+                    txn_mgr_->abort(context->txn_, context->log_mgr_);
+                }
+                *txn_id = INVALID_TXN_ID;
+                context->txn_ = nullptr;
                 break;
-            }    
+            }
             case T_Transaction_abort:
             {
                 context->txn_ = txn_mgr_->get_transaction(*txn_id);
-                txn_mgr_->abort(context->txn_, context->log_mgr_);
+                if (context->txn_ != nullptr &&
+                    context->txn_->get_state() != TransactionState::COMMITTED &&
+                    context->txn_->get_state() != TransactionState::ABORTED) {
+                    txn_mgr_->abort(context->txn_, context->log_mgr_);
+                }
+                *txn_id = INVALID_TXN_ID;
+                context->txn_ = nullptr;
                 break;
-            }     
+            }
             default:
                 throw InternalError("Unexpected field type");
-                break;                        
+                break;
         }
 
     } else if(auto x = std::dynamic_pointer_cast<SetKnobPlan>(plan)) {

@@ -40,7 +40,16 @@ class UpdateExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> Next() override {
         for (auto &rid : rids_) {
             // 获取当前记录
-            auto old_rec = fh_->get_record(rid, context_);
+            auto physical_old_rec = fh_->get_record(rid, context_);
+            bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
+            std::unique_ptr<RmRecord> old_rec;
+            if (mvcc) {
+                old_rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, rid, *physical_old_rec, context_->txn_);
+                if (old_rec == nullptr) continue;
+            } else {
+                old_rec = std::move(physical_old_rec);
+            }
             auto new_rec = std::make_unique<RmRecord>(fh_->get_file_hdr().record_size, old_rec->data);
 
 	            for (auto &set_clause : set_clauses_) {
@@ -55,10 +64,9 @@ class UpdateExecutor : public AbstractExecutor {
 	                memcpy(new_rec->data + col_meta->offset, set_clause.rhs.raw->data, col_meta->len);
 	            }
 
-	            bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-	                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
 	            if (mvcc) {
 	                context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *old_rec, context_->txn_);
+	                context_->txn_mgr_->CheckMvccUniqueConflict(tab_name_, *new_rec, context_->txn_, &rid);
 	            }
 
 	            for (auto &index : tab_.indexes) {
