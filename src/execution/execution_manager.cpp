@@ -47,6 +47,37 @@ const char *help_info = "Supported SQL syntax:\n"
                    "selector:\n"
                    "  {* | column [, column ...]}\n";
 
+static std::string format_select_output(const std::vector<std::string> &captions,
+                                        const std::vector<std::vector<std::string>> &rows) {
+    constexpr size_t COL_WIDTH = 16;
+    std::ostringstream os;
+    auto print_separator = [&]() {
+        for (size_t i = 0; i < captions.size(); ++i) {
+            os << "+" << std::string(COL_WIDTH + 2, '-');
+        }
+        os << "+\n";
+    };
+    auto print_record = [&](const std::vector<std::string> &cols) {
+        for (auto col : cols) {
+            if (col.size() > COL_WIDTH) {
+                col = col.substr(0, COL_WIDTH - 3) + "...";
+            }
+            os << "| " << std::setw(COL_WIDTH) << col << " ";
+        }
+        os << "|\n";
+    };
+
+    print_separator();
+    print_record(captions);
+    print_separator();
+    for (const auto &row : rows) {
+        print_record(row);
+    }
+    print_separator();
+    os << "Total record(s): " << rows.size() << "\n";
+    return os.str();
+}
+
 // 主要负责执行DDL语句
 void QlManager::run_mutli_query(std::shared_ptr<Plan> plan, Context *context){
     if (auto x = std::dynamic_pointer_cast<DDLPlan>(plan)) {
@@ -229,31 +260,20 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     rec_printer.print_separator(context);
     rec_printer.print_record(captions, context);
     rec_printer.print_separator(context);
-    // print header into file
-    std::fstream outfile;
-    outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-    outfile << "|";
-    for(int i = 0; i < captions.size(); ++i) {
-        outfile << " " << captions[i] << " |";
-    }
-    outfile << "\n";
-
     // Print records
     for (auto &columns : rows) {
         // print record into buffer
         rec_printer.print_record(columns, context);
-        // print record into file
-        outfile << "|";
-        for(int i = 0; i < columns.size(); ++i) {
-            outfile << " " << columns[i] << " |";
-        }
-        outfile << "\n";
     }
-    outfile.close();
     // Print footer into buffer
     rec_printer.print_separator(context);
     // Print record count into buffer
     RecordPrinter::print_record_count(rows.size(), context);
+
+    std::fstream outfile;
+    outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+    outfile << format_select_output(captions, rows);
+    outfile.close();
 }
 
 // 执行DML语句

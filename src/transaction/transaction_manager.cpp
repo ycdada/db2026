@@ -162,12 +162,17 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
         txn->set_start_ts(start_ts);
         txn->set_read_ts(start_ts);
         running_txns_.AddTxn(start_ts);
+        active_mvcc_txn_count_.fetch_add(1);
     }
     return txn;
 }
 
 bool TransactionManager::IsMvccTxn(Transaction *txn) const {
     return txn != nullptr && txn->is_mvcc();
+}
+
+bool TransactionManager::HasActiveMvccTransactions() const {
+    return active_mvcc_txn_count_.load() > 0;
 }
 
 std::string TransactionManager::MvccKey(const std::string &tab_name, const Rid &rid) const {
@@ -420,11 +425,22 @@ std::vector<std::string> TransactionManager::BuildMvccConflictKeys(const TabMeta
     keys.reserve(std::max<size_t>(1, tab.indexes.size()));
     for (auto &index : tab.indexes) {
         auto raw_key = make_index_key(record, index);
-        keys.emplace_back(raw_key.data(), raw_key.size());
+        std::string key = "idx:";
+        for (auto &col : index.cols) {
+            key += col.name;
+            key += ",";
+        }
+        key.push_back('\0');
+        key.append(raw_key.data(), raw_key.size());
+        keys.emplace_back(std::move(key));
     }
     if (keys.empty() && !tab.cols.empty()) {
         auto &col = tab.cols.front();
-        keys.emplace_back(record.data + col.offset, col.len);
+        std::string key = "fallback:";
+        key += col.name;
+        key.push_back('\0');
+        key.append(record.data + col.offset, col.len);
+        keys.emplace_back(std::move(key));
     }
     return keys;
 }
@@ -678,6 +694,7 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         }
         running_txns_.UpdateCommitTs(commit_ts);
         running_txns_.RemoveTxn(txn->get_read_ts());
+        active_mvcc_txn_count_.fetch_sub(1);
         {
             std::scoped_lock<std::mutex> lock(mvcc_latch_);
             CleanupSerializableStateLocked();
@@ -770,6 +787,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             ClearTxnStateLocked(txn);
         }
 	        running_txns_.RemoveTxn(txn->get_read_ts());
+            active_mvcc_txn_count_.fetch_sub(1);
 	        {
 	            std::scoped_lock<std::mutex> lock(mvcc_latch_);
 	            CleanupSerializableStateLocked();

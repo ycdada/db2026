@@ -126,6 +126,7 @@ public:
 
     /** @brief 垃圾回收。仅在所有事务都未访问时调用。 */
     void GarbageCollection();
+    bool HasActiveMvccTransactions() const;
 
     bool IsMvccTxn(Transaction *txn) const;
     std::string MvccKey(const std::string &tab_name, const Rid &rid) const;
@@ -171,6 +172,7 @@ private:
     LockManager *lock_manager_;
 
     std::atomic<timestamp_t> last_commit_ts_{0};    // 最后提交的时间戳,仅用于MVCC
+    std::atomic<int> active_mvcc_txn_count_{0};
     Watermark running_txns_{0};             // 存储所有正在运行事务的读取时间戳，以便于垃圾回收，仅用于MVCC
 
     struct MvccVersion {
