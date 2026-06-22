@@ -14,6 +14,7 @@ See the Mulan PSL v2 for more details. */
 #include <setjmp.h>
 #include <signal.h>
 #include <unistd.h>
+#include <atomic>
 #include "errors.h"
 #include "optimizer/optimizer.h"
 #include "recovery/log_recovery.h"
@@ -26,6 +27,7 @@ See the Mulan PSL v2 for more details. */
 #define MAX_CONN_LIMIT 8
 
 static bool should_exit = false;
+static std::atomic<int> configured_isolation_level{0};
 
 // 构建全局所需的管理器对象
 auto disk_manager = std::make_unique<DiskManager>();
@@ -67,6 +69,40 @@ static bool is_session_only_query(const std::shared_ptr<Query> &query) {
 
 static bool query_needs_transaction(const std::shared_ptr<Query> &query) {
     return !is_transaction_control_query(query) && !is_session_only_query(query);
+}
+
+static bool is_begin_query(const std::shared_ptr<Query> &query) {
+    return std::dynamic_pointer_cast<ast::TxnBegin>(query->parse) != nullptr;
+}
+
+static int EncodeIsolationLevel(IsolationLevel level) {
+    if (level == IsolationLevel::SNAPSHOT_ISOLATION) return 1;
+    if (level == IsolationLevel::SERIALIZABLE) return 2;
+    return 0;
+}
+
+static IsolationLevel DecodeIsolationLevel(int encoded) {
+    if (encoded == 1) return IsolationLevel::SNAPSHOT_ISOLATION;
+    if (encoded == 2) return IsolationLevel::SERIALIZABLE;
+    return IsolationLevel::READ_COMMITTED;
+}
+
+static void MaybeInheritConcurrentMvccIsolation(const std::shared_ptr<Query> &query, txn_id_t txn_id,
+                                                bool session_isolation_explicit,
+                                                IsolationLevel *session_isolation_level) {
+    if (session_isolation_explicit || txn_id != INVALID_TXN_ID) {
+        return;
+    }
+    if (!query_needs_transaction(query) && !is_begin_query(query)) {
+        return;
+    }
+    if (!txn_manager->HasActiveMvccTransactions()) {
+        return;
+    }
+    int encoded = configured_isolation_level.load(std::memory_order_acquire);
+    if (encoded != 0) {
+        *session_isolation_level = DecodeIsolationLevel(encoded);
+    }
 }
 
 static void EnsureStatementTransaction(txn_id_t *txn_id, Context *context,
@@ -115,8 +151,7 @@ void *client_handler(void *sock_fd) {
     // 记录客户端当前正在执行的事务ID
     txn_id_t txn_id = INVALID_TXN_ID;
     IsolationLevel session_isolation_level = IsolationLevel::READ_COMMITTED;
-    bool explicit_txn_aborted = false;
-
+    bool session_isolation_explicit = false;
     std::string output = "establish client connection, sockfd: " + std::to_string(fd) + "\n";
     std::cout << output;
 
@@ -167,20 +202,21 @@ void *client_handler(void *sock_fd) {
                     yy_delete_buffer(buf);
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
-                    bool skip_execution = explicit_txn_aborted && query_needs_transaction(query);
-                    if (query_needs_transaction(query) && !skip_execution) {
+                    MaybeInheritConcurrentMvccIsolation(query, txn_id, session_isolation_explicit,
+                                                        &session_isolation_level);
+                    if (query_needs_transaction(query)) {
                         EnsureStatementTransaction(&txn_id, context, session_isolation_level);
                     }
-                    if (!skip_execution) {
-                        // 优化器
-                        std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
-                        // portal
-                        std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
-                        portal->run(portalStmt, ql_manager.get(), &txn_id, context);
-                        portal->drop();
-                    }
-                    if (is_transaction_control_query(query)) {
-                        explicit_txn_aborted = false;
+                    // 优化器
+                    std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
+                    // portal
+                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
+                    portal->run(portalStmt, ql_manager.get(), &txn_id, context);
+                    portal->drop();
+                    if (std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
+                        session_isolation_explicit = true;
+                        configured_isolation_level.store(EncodeIsolationLevel(session_isolation_level),
+                                                         std::memory_order_release);
                     }
                 } catch (TransactionAbortException &e) {
                     // 事务需要回滚，需要把abort信息返回给客户端并写入output.txt文件中
@@ -190,7 +226,6 @@ void *client_handler(void *sock_fd) {
                     offset = str.length();
 
                     // 回滚事务
-                    explicit_txn_aborted = context->txn_ != nullptr && context->txn_->get_txn_mode();
                     AbortActiveTransaction(&txn_id, context);
                     std::cout << e.GetInfo() << std::endl;
 
