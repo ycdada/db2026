@@ -57,6 +57,9 @@ class InsertExecutor : public AbstractExecutor {
         }
         bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                     context_->txn_mgr_->IsMvccTxn(context_->txn_);
+        // RC 写者在有活跃 SI/SER 事务时也要登记 MVCC 版本（题目9 示例二）。
+        bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                              context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
         if (mvcc) {
             context_->txn_mgr_->CheckMvccInsertConflict(tab_name_, rec, context_->txn_);
         }
@@ -74,7 +77,7 @@ class InsertExecutor : public AbstractExecutor {
             }
         }
         // Insert into record file
-        if (mvcc) {
+        if (version_writes) {
             rid_ = context_->txn_mgr_->MvccInsertWithPhysical(
                 tab_name_, rec, context_->txn_,
                 [&]() { return fh_->insert_record(rec.data, context_); },

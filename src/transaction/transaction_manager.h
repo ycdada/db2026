@@ -129,6 +129,9 @@ public:
     bool HasActiveMvccTransactions() const;
 
     bool IsMvccTxn(Transaction *txn) const;
+    // 当写者本身是 SI/SER，或当前存在活跃的 SI/SER 事务时，写操作必须保留旧版本，
+    // 否则原地覆盖会破坏活跃快照（见题目9 示例二：T2 未 SET 仍不能毁掉 T1 的 SI 快照）。
+    bool ShouldVersionWrites(Transaction *txn) const;
     std::string MvccKey(const std::string &tab_name, const Rid &rid) const;
     std::unique_ptr<RmRecord> GetVisibleRecord(const std::string &tab_name, const Rid &rid,
                                                const RmRecord &physical, Transaction *txn);

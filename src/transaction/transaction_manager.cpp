@@ -171,6 +171,12 @@ bool TransactionManager::IsMvccTxn(Transaction *txn) const {
     return txn != nullptr && txn->is_mvcc();
 }
 
+bool TransactionManager::ShouldVersionWrites(Transaction *txn) const {
+    if (txn == nullptr) return false;
+    // 写者自身是 SI/SER，或系统中存在活跃 SI/SER 事务时，必须保留旧版本。
+    return txn->is_mvcc() || active_mvcc_txn_count_.load() > 0;
+}
+
 bool TransactionManager::HasActiveMvccTransactions() const {
     return active_mvcc_txn_count_.load() > 0;
 }
@@ -204,6 +210,11 @@ TransactionManager::MvccEntry &TransactionManager::EnsureMvccEntryLocked(
 std::optional<RmRecord> TransactionManager::VisibleRecordLocked(
     const std::string &key, const MvccEntry &entry, const RmRecord &physical, Transaction *txn) const {
     if (!IsMvccTxn(txn)) {
+        // RC 读者：先返回自己未提交的写入，否则返回最新已提交版本。
+        if (txn != nullptr && entry.writer_txn == txn->get_transaction_id()) {
+            if (!entry.exists || entry.is_deleted) return std::nullopt;
+            return RmRecord(physical);
+        }
         if (entry.writer_txn != INVALID_TXN_ID) {
             for (auto it = entry.undo_versions.rbegin(); it != entry.undo_versions.rend(); ++it) {
                 if (it->writer_txn == INVALID_TXN_ID) {
@@ -294,11 +305,15 @@ void TransactionManager::PrepareWriteLocked(const std::string &tab_name, const R
     auto &entry = EnsureMvccEntryLocked(tab_name, rid, inserted_record ? nullptr : &old_rec);
     txn_id_t txn_id = txn->get_transaction_id();
 
-    if (entry.writer_txn != INVALID_TXN_ID && entry.writer_txn != txn_id) {
-        throw TransactionAbortException(txn_id, AbortReason::MVCC_CONFLICT);
-    }
-    if (entry.writer_txn != txn_id && entry.commit_ts > txn->get_start_ts()) {
-        throw TransactionAbortException(txn_id, AbortReason::MVCC_CONFLICT);
+    // 写写冲突 abort 仅对 SI/SER 写者生效（mirror SI WW rules）。RC 写者只保留旧版本、不 abort，
+    // 否则会破坏题目9 示例二（T2 未 SET 必须成功提交，同时保留 T1 的快照）。
+    if (IsMvccTxn(txn)) {
+        if (entry.writer_txn != INVALID_TXN_ID && entry.writer_txn != txn_id) {
+            throw TransactionAbortException(txn_id, AbortReason::MVCC_CONFLICT);
+        }
+        if (entry.writer_txn != txn_id && entry.commit_ts > txn->get_start_ts()) {
+            throw TransactionAbortException(txn_id, AbortReason::MVCC_CONFLICT);
+        }
     }
 
     if (txn->mvcc_write_keys().count(key) == 0) {
@@ -414,7 +429,7 @@ void TransactionManager::MvccInsertLocked(const std::string &tab_name, const Rid
 
 void TransactionManager::MvccInsert(const std::string &tab_name, const Rid &rid,
                                     const RmRecord &new_rec, Transaction *txn) {
-    if (!IsMvccTxn(txn)) return;
+    if (!ShouldVersionWrites(txn)) return;
     std::scoped_lock<std::mutex> lock(mvcc_latch_);
     MvccInsertLocked(tab_name, rid, new_rec, txn);
 }
@@ -508,7 +523,7 @@ void TransactionManager::CheckMvccInsertConflict(const std::string &tab_name, co
 Rid TransactionManager::MvccInsertWithPhysical(const std::string &tab_name, const RmRecord &new_rec, Transaction *txn,
                                                const std::function<Rid()> &insert_fn,
                                                const std::function<void(const Rid &)> &rollback_fn) {
-    if (!IsMvccTxn(txn)) {
+    if (!ShouldVersionWrites(txn)) {
         return insert_fn();
     }
     std::scoped_lock<std::mutex> lock(mvcc_latch_);
@@ -524,7 +539,7 @@ Rid TransactionManager::MvccInsertWithPhysical(const std::string &tab_name, cons
 
 void TransactionManager::MvccUpdate(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
                                     const RmRecord &new_rec, Transaction *txn) {
-    if (!IsMvccTxn(txn)) return;
+    if (!ShouldVersionWrites(txn)) return;
     std::scoped_lock<std::mutex> lock(mvcc_latch_);
     CheckSerializableWriteLocked(tab_name, rid, &old_rec, &new_rec, txn);
     PrepareWriteLocked(tab_name, rid, old_rec, txn, false);
@@ -540,7 +555,7 @@ void TransactionManager::MvccUpdate(const std::string &tab_name, const Rid &rid,
 
 void TransactionManager::MvccDelete(const std::string &tab_name, const Rid &rid,
                                     const RmRecord &old_rec, Transaction *txn) {
-    if (!IsMvccTxn(txn)) return;
+    if (!ShouldVersionWrites(txn)) return;
     std::scoped_lock<std::mutex> lock(mvcc_latch_);
     CheckSerializableWriteLocked(tab_name, rid, &old_rec, nullptr, txn);
     PrepareWriteLocked(tab_name, rid, old_rec, txn, false);
@@ -670,7 +685,7 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     // 如果需要支持MVCC请在上述过程中添加代码
     if (txn == nullptr) return;
 
-    if (txn->is_mvcc()) {
+    if (txn->is_mvcc() || !txn->mvcc_write_keys().empty()) {
         timestamp_t commit_ts;
         {
             std::scoped_lock<std::mutex> lock(mvcc_latch_);
@@ -695,8 +710,11 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
             last_commit_ts_.store(commit_ts);
         }
         running_txns_.UpdateCommitTs(commit_ts);
-        running_txns_.RemoveTxn(txn->get_read_ts());
-        active_mvcc_txn_count_.fetch_sub(1);
+        // 仅在 begin 时登记过的 SI/SER 事务才回收活跃计数与水位。
+        if (txn->is_mvcc()) {
+            running_txns_.RemoveTxn(txn->get_read_ts());
+            active_mvcc_txn_count_.fetch_sub(1);
+        }
         {
             std::scoped_lock<std::mutex> lock(mvcc_latch_);
             CleanupSerializableStateLocked();
@@ -735,7 +753,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     // 如果需要支持MVCC请在上述过程中添加代码
     if (txn == nullptr) return;
 
-    if (txn->is_mvcc()) {
+    if (txn->is_mvcc() || !txn->mvcc_write_keys().empty()) {
         std::vector<WriteRecord *> records;
         auto write_set = txn->get_write_set();
         while (!write_set->empty()) {
@@ -788,8 +806,11 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             std::scoped_lock<std::mutex> lock(mvcc_latch_);
             ClearTxnStateLocked(txn);
         }
-	        running_txns_.RemoveTxn(txn->get_read_ts());
-            active_mvcc_txn_count_.fetch_sub(1);
+	        // 仅 SI/SER 事务在 begin 登记过活跃计数与水位，RC 写者未登记不可回收。
+	        if (txn->is_mvcc()) {
+	            running_txns_.RemoveTxn(txn->get_read_ts());
+	            active_mvcc_txn_count_.fetch_sub(1);
+	        }
 	        {
 	            std::scoped_lock<std::mutex> lock(mvcc_latch_);
 	            CleanupSerializableStateLocked();

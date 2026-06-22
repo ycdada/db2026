@@ -9,3 +9,4 @@ task9_inherit_smoke_db/
 tmp_task9_smoke_db/
 BufferPoolManagerTest_db/
 tmp_*_db/
+repro9_*/

@@ -14,35 +14,45 @@ Originally developed by Renmin University of China's database teaching team.
 
 ## Build & Run
 
+The project builds from the **repository root** (the top-level `CMakeLists.txt` does `add_subdirectory(src)`). There is no `rmdb/` subdirectory.
+
 ```bash
-# Build (from rmdb/ directory)
-mkdir -p build && cd build
-cmake .. && make -j$(nproc)
+# Build (from repo root)
+cmake -S . -B build && cmake --build build -j$(nproc)
+# or: mkdir -p build && cd build && cmake .. && make -j$(nproc)
 
-# Run the server
-./bin/rmdb <database_name>
+# Run the server (creates/opens a database directory)
+./build/bin/rmdb <database_name>
 
-# Run the client (separate terminal)
-cd build && ./bin/rmdb_client
+# Run the client (separate terminal) — connects to localhost:8765
+./build/bin/rmdb_client
 ```
 
 ### Compiler flags
 - Debug mode (default): `-Wall -O0 -g -ggdb3` includes full debug symbols, no optimization
-- Release mode: uncomment `-O3` line in `CMakeLists.txt` and comment out the debug flag line
+- Release mode: uncomment `-O3` line in the root `CMakeLists.txt` and comment out the debug flag line
 
 ### Tests
 
-```bash
-# Build and run unit tests (from build/)
-make unit_test
-./bin/unit_test
+Built binaries land in `build/bin/`: `rmdb`, `rmdb_client`, `unit_test`, `test_parser`, `ix_consistency_test`.
 
-# Run a single test (registered via gtest)
-./bin/unit_test --gtest_filter="BufferPoolManagerTest.SampleTest"
-./bin/unit_test --gtest_filter="LRUReplacerTest.*"
-./bin/unit_test --gtest_filter="StorageTest.*"
-./bin/unit_test --gtest_filter="RecordManagerTest.*"
+```bash
+# GoogleTest suite (storage / replacer / record / buffer pool)
+cmake --build build --target unit_test && ./build/bin/unit_test
+
+# Run a single test / group via gtest filter
+./build/bin/unit_test --gtest_filter="BufferPoolManagerTest.SampleTest"
+./build/bin/unit_test --gtest_filter="LRUReplacerTest.*"
+
+# Parser test — the only target registered with CTest
+cd build && ctest --output-on-failure   # runs test_parser
+./build/bin/test_parser                 # or run directly
+
+# Index consistency check
+./build/bin/ix_consistency_test
 ```
+
+When changing the grammar, edit `src/parser/lex.l` / `src/parser/yacc.y` and rebuild so generated `lex.yy.cpp` / `yacc.tab.cpp` are refreshed. Never hand-edit those generated files.
 
 ### Dependencies
 - GCC 7.1+ (C++17 support required)
@@ -110,3 +120,11 @@ SQL text → Parser (flex/bison) → AST → Analyzer → Query
 - **Context object**: `Context` wraps per-request state (transaction, lock manager, log manager, output buffer) passed through the execution pipeline
 - **KV config**: Runtime knobs set via SQL `set enable_nestloop = true/false` → `SetKnobPlan` → `SetKnobExecutor`
 - **Recovery**: WAL log file (`db.log`) with analyze → redo → undo phases at server startup
+
+## Contest Workflow
+
+Work is organized around numbered contest tasks (题目1–题目10). Per-task notes, requirements, and debug records live in `todolists/` (e.g. `todolists/题目9检查记录.md` for MVCC/SI). Read the relevant task file before starting work on a feature it covers.
+
+Commit subjects are short and contest-scoped (e.g. `9.5`, `第三题提交`). Keep them brief and tied to one change.
+
+When debugging against the grader, mismatches are often output-format drift, not logic bugs — verify SELECT formatting (column separators, `Total record(s)` line) matches the expected client output exactly.

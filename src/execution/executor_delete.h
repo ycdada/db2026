@@ -55,6 +55,9 @@ class DeleteExecutor : public AbstractExecutor {
             auto physical = fh_->get_record(rid, context_);
             bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                         context_->txn_mgr_->IsMvccTxn(context_->txn_);
+            // RC 写者在有活跃 SI/SER 事务时也要保留旧版本并保留物理槽位（题目9 示例二）。
+            bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                                  context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
             std::unique_ptr<RmRecord> rec;
             if (mvcc) {
                 rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, rid, *physical, context_->txn_);
@@ -65,6 +68,8 @@ class DeleteExecutor : public AbstractExecutor {
             }
             if (mvcc) {
                 context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *rec, context_->txn_);
+            }
+            if (version_writes) {
                 context_->txn_mgr_->MvccDelete(tab_name_, rid, *rec, context_->txn_);
             }
             if (context_->txn_ != nullptr) {
@@ -85,7 +90,7 @@ class DeleteExecutor : public AbstractExecutor {
                     ih->delete_entry(key.data(), context_->txn_);
                 }
                 // MVCC 删除保留物理槽位，旧快照仍可通过版本目录读到旧值。
-                if (!mvcc) {
+                if (!version_writes) {
                     fh_->delete_record(rid, context_);
                 }
             } catch (TransactionAbortException &) {
