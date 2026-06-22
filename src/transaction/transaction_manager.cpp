@@ -420,7 +420,8 @@ void TransactionManager::MvccInsert(const std::string &tab_name, const Rid &rid,
 }
 
 std::vector<std::string> TransactionManager::BuildMvccConflictKeys(const TabMeta &tab,
-                                                                    const RmRecord &record) const {
+                                                                    const RmRecord &record,
+                                                                    bool include_fallback) const {
     std::vector<std::string> keys;
     keys.reserve(std::max<size_t>(1, tab.indexes.size()));
     for (auto &index : tab.indexes) {
@@ -434,7 +435,7 @@ std::vector<std::string> TransactionManager::BuildMvccConflictKeys(const TabMeta
         key.append(raw_key.data(), raw_key.size());
         keys.emplace_back(std::move(key));
     }
-    if (keys.empty() && !tab.cols.empty()) {
+    if (keys.empty() && include_fallback && !tab.cols.empty()) {
         auto &col = tab.cols.front();
         std::string key = "fallback:";
         key += col.name;
@@ -446,9 +447,9 @@ std::vector<std::string> TransactionManager::BuildMvccConflictKeys(const TabMeta
 }
 
 bool TransactionManager::RecordsConflictByLogicalKey(const TabMeta &tab, const RmRecord &lhs,
-                                                     const RmRecord &rhs) const {
-    auto lhs_keys = BuildMvccConflictKeys(tab, lhs);
-    auto rhs_keys = BuildMvccConflictKeys(tab, rhs);
+                                                     const RmRecord &rhs, bool include_fallback) const {
+    auto lhs_keys = BuildMvccConflictKeys(tab, lhs, include_fallback);
+    auto rhs_keys = BuildMvccConflictKeys(tab, rhs, include_fallback);
     for (auto &lhs_key : lhs_keys) {
         for (auto &rhs_key : rhs_keys) {
             if (lhs_key == rhs_key) {
@@ -483,15 +484,16 @@ void TransactionManager::CheckMvccUniqueConflict(const std::string &tab_name, co
         if (!has_live_version) {
             continue;
         }
+        bool include_fallback = self_rid == nullptr;
         if (entry.exists && !entry.is_deleted &&
-            RecordsConflictByLogicalKey(tab, new_rec, entry.head_record)) {
+            RecordsConflictByLogicalKey(tab, new_rec, entry.head_record, include_fallback)) {
             throw TransactionAbortException(txn->get_transaction_id(), AbortReason::MVCC_CONFLICT);
         }
         for (auto &version : entry.undo_versions) {
             if (version.is_deleted) {
                 continue;
             }
-            if (RecordsConflictByLogicalKey(tab, new_rec, version.record)) {
+            if (RecordsConflictByLogicalKey(tab, new_rec, version.record, include_fallback)) {
                 throw TransactionAbortException(txn->get_transaction_id(), AbortReason::MVCC_CONFLICT);
             }
         }

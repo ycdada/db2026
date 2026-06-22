@@ -26,6 +26,17 @@ class UpdateExecutor : public AbstractExecutor {
     std::vector<SetClause> set_clauses_;
     SmManager *sm_manager_;
 
+    [[noreturn]] void abort_mvcc_statement() {
+        auto txn = context_ != nullptr ? context_->txn_ : nullptr;
+        txn_id_t txn_id = txn != nullptr ? txn->get_transaction_id() : INVALID_TXN_ID;
+        if (context_ != nullptr && context_->txn_mgr_ != nullptr && context_->txn_mgr_->IsMvccTxn(txn) &&
+            txn != nullptr && txn->get_state() != TransactionState::COMMITTED &&
+            txn->get_state() != TransactionState::ABORTED) {
+            context_->txn_mgr_->abort(txn, context_->log_mgr_);
+        }
+        throw TransactionAbortException(txn_id, AbortReason::MVCC_CONFLICT);
+    }
+
    public:
     UpdateExecutor(SmManager *sm_manager, const std::string &tab_name, std::vector<SetClause> set_clauses,
                    std::vector<Condition> conds, std::vector<Rid> rids, Context *context) {
@@ -93,38 +104,48 @@ class UpdateExecutor : public AbstractExecutor {
 	                context_->txn_mgr_->MvccUpdate(tab_name_, rid, *old_rec, *new_rec, context_->txn_);
 	            }
 
-            // 更新前，删除旧索引项
-            for (size_t i = 0; i < tab_.indexes.size(); ++i) {
-                auto &index = tab_.indexes[i];
-                auto ih = sm_manager_->ihs_.at(
-                    sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                std::vector<char> old_key(index.col_tot_len);
-                int offset = 0;
-                for (int j = 0; j < index.col_num; ++j) {
-                    memcpy(old_key.data() + offset, old_rec->data + index.cols[j].offset, index.cols[j].len);
-                    offset += index.cols[j].len;
-                }
-                ih->delete_entry(old_key.data(), context_->txn_);
-            }
-
-            // 将更新后的记录写回
-            fh_->update_record(rid, new_rec->data, context_);
             if (context_->txn_ != nullptr) {
                 context_->txn_->append_write_record(new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *old_rec));
             }
 
-            // 插入新的索引项
-            for (size_t i = 0; i < tab_.indexes.size(); ++i) {
-                auto &index = tab_.indexes[i];
-                auto ih = sm_manager_->ihs_.at(
-                    sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                std::vector<char> new_key(index.col_tot_len);
-                int offset = 0;
-                for (int j = 0; j < index.col_num; ++j) {
-                    memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
-                    offset += index.cols[j].len;
+            try {
+                // 更新前，删除旧索引项
+                for (size_t i = 0; i < tab_.indexes.size(); ++i) {
+                    auto &index = tab_.indexes[i];
+                    auto ih = sm_manager_->ihs_.at(
+                        sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                    std::vector<char> old_key(index.col_tot_len);
+                    int offset = 0;
+                    for (int j = 0; j < index.col_num; ++j) {
+                        memcpy(old_key.data() + offset, old_rec->data + index.cols[j].offset, index.cols[j].len);
+                        offset += index.cols[j].len;
+                    }
+                    ih->delete_entry(old_key.data(), context_->txn_);
                 }
-                ih->insert_entry(new_key.data(), rid, context_->txn_);
+
+                // 将更新后的记录写回
+                fh_->update_record(rid, new_rec->data, context_);
+
+                // 插入新的索引项
+                for (size_t i = 0; i < tab_.indexes.size(); ++i) {
+                    auto &index = tab_.indexes[i];
+                    auto ih = sm_manager_->ihs_.at(
+                        sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                    std::vector<char> new_key(index.col_tot_len);
+                    int offset = 0;
+                    for (int j = 0; j < index.col_num; ++j) {
+                        memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
+                        offset += index.cols[j].len;
+                    }
+                    ih->insert_entry(new_key.data(), rid, context_->txn_);
+                }
+            } catch (TransactionAbortException &) {
+                throw;
+            } catch (...) {
+                if (mvcc) {
+                    abort_mvcc_statement();
+                }
+                throw;
             }
         }
         return nullptr;

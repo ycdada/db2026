@@ -25,6 +25,17 @@ class DeleteExecutor : public AbstractExecutor {
     std::string tab_name_;          // 表名称
     SmManager *sm_manager_;
 
+    [[noreturn]] void abort_mvcc_statement() {
+        auto txn = context_ != nullptr ? context_->txn_ : nullptr;
+        txn_id_t txn_id = txn != nullptr ? txn->get_transaction_id() : INVALID_TXN_ID;
+        if (context_ != nullptr && context_->txn_mgr_ != nullptr && context_->txn_mgr_->IsMvccTxn(txn) &&
+            txn != nullptr && txn->get_state() != TransactionState::COMMITTED &&
+            txn->get_state() != TransactionState::ABORTED) {
+            context_->txn_mgr_->abort(txn, context_->log_mgr_);
+        }
+        throw TransactionAbortException(txn_id, AbortReason::MVCC_CONFLICT);
+    }
+
    public:
     DeleteExecutor(SmManager *sm_manager, const std::string &tab_name, std::vector<Condition> conds,
                    std::vector<Rid> rids, Context *context) {
@@ -56,25 +67,34 @@ class DeleteExecutor : public AbstractExecutor {
                 context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *rec, context_->txn_);
                 context_->txn_mgr_->MvccDelete(tab_name_, rid, *rec, context_->txn_);
             }
-            // 删除索引项
-            for (size_t i = 0; i < tab_.indexes.size(); ++i) {
-                auto &index = tab_.indexes[i];
-                auto ih = sm_manager_->ihs_.at(
-                    sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                std::vector<char> key(index.col_tot_len);
-                int offset = 0;
-                for (int j = 0; j < index.col_num; ++j) {
-                    memcpy(key.data() + offset, rec->data + index.cols[j].offset, index.cols[j].len);
-                    offset += index.cols[j].len;
-                }
-                ih->delete_entry(key.data(), context_->txn_);
-            }
-            // MVCC 删除保留物理槽位，旧快照仍可通过版本目录读到旧值。
-            if (!mvcc) {
-                fh_->delete_record(rid, context_);
-            }
             if (context_->txn_ != nullptr) {
                 context_->txn_->append_write_record(new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec));
+            }
+            try {
+                // 删除索引项
+                for (size_t i = 0; i < tab_.indexes.size(); ++i) {
+                    auto &index = tab_.indexes[i];
+                    auto ih = sm_manager_->ihs_.at(
+                        sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                    std::vector<char> key(index.col_tot_len);
+                    int offset = 0;
+                    for (int j = 0; j < index.col_num; ++j) {
+                        memcpy(key.data() + offset, rec->data + index.cols[j].offset, index.cols[j].len);
+                        offset += index.cols[j].len;
+                    }
+                    ih->delete_entry(key.data(), context_->txn_);
+                }
+                // MVCC 删除保留物理槽位，旧快照仍可通过版本目录读到旧值。
+                if (!mvcc) {
+                    fh_->delete_record(rid, context_);
+                }
+            } catch (TransactionAbortException &) {
+                throw;
+            } catch (...) {
+                if (mvcc) {
+                    abort_mvcc_statement();
+                }
+                throw;
             }
         }
         return nullptr;
