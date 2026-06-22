@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #pragma once
 #include "execution_defs.h"
 #include "execution_manager.h"
+#include "execution_common.h"
 #include "executor_abstract.h"
 #include "index/ix.h"
 #include "system/sm.h"
@@ -47,6 +48,7 @@ class UpdateExecutor : public AbstractExecutor {
             if (mvcc) {
                 old_rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, rid, *physical_old_rec, context_->txn_);
                 if (old_rec == nullptr) continue;
+                if (!eval_conds(old_rec->data, tab_.cols, conds_)) continue;
             } else {
                 old_rec = std::move(physical_old_rec);
             }

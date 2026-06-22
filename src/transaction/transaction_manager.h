@@ -223,6 +223,8 @@ private:
 	                                     const RmRecord *physical = nullptr);
 	    std::optional<RmRecord> VisibleRecordLocked(const std::string &key, const MvccEntry &entry,
 	                                                const RmRecord &physical, Transaction *txn) const;
+	    std::vector<std::string> BuildMvccConflictKeys(const TabMeta &tab, const RmRecord &record) const;
+	    bool RecordsConflictByLogicalKey(const TabMeta &tab, const RmRecord &lhs, const RmRecord &rhs) const;
 	    void MvccInsertLocked(const std::string &tab_name, const Rid &rid, const RmRecord &new_rec, Transaction *txn);
 	    void PrepareWriteLocked(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
 	                            Transaction *txn, bool inserted_record);

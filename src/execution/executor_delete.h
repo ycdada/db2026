@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #pragma once
 #include "execution_defs.h"
 #include "execution_manager.h"
+#include "execution_common.h"
 #include "executor_abstract.h"
 #include "index/ix.h"
 #include "system/sm.h"
@@ -47,6 +48,7 @@ class DeleteExecutor : public AbstractExecutor {
             if (mvcc) {
                 rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, rid, *physical, context_->txn_);
                 if (rec == nullptr) continue;
+                if (!eval_conds(rec->data, tab_.cols, conds_)) continue;
             } else {
                 rec = std::move(physical);
             }

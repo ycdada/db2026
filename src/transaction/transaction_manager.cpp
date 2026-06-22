@@ -414,6 +414,35 @@ void TransactionManager::MvccInsert(const std::string &tab_name, const Rid &rid,
     MvccInsertLocked(tab_name, rid, new_rec, txn);
 }
 
+std::vector<std::string> TransactionManager::BuildMvccConflictKeys(const TabMeta &tab,
+                                                                    const RmRecord &record) const {
+    std::vector<std::string> keys;
+    keys.reserve(std::max<size_t>(1, tab.indexes.size()));
+    for (auto &index : tab.indexes) {
+        auto raw_key = make_index_key(record, index);
+        keys.emplace_back(raw_key.data(), raw_key.size());
+    }
+    if (keys.empty() && !tab.cols.empty()) {
+        auto &col = tab.cols.front();
+        keys.emplace_back(record.data + col.offset, col.len);
+    }
+    return keys;
+}
+
+bool TransactionManager::RecordsConflictByLogicalKey(const TabMeta &tab, const RmRecord &lhs,
+                                                     const RmRecord &rhs) const {
+    auto lhs_keys = BuildMvccConflictKeys(tab, lhs);
+    auto rhs_keys = BuildMvccConflictKeys(tab, rhs);
+    for (auto &lhs_key : lhs_keys) {
+        for (auto &rhs_key : rhs_keys) {
+            if (lhs_key == rhs_key) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void TransactionManager::CheckMvccUniqueConflict(const std::string &tab_name, const RmRecord &new_rec,
                                                  Transaction *txn, const Rid *self_rid) {
     if (!IsMvccTxn(txn)) return;
@@ -438,22 +467,16 @@ void TransactionManager::CheckMvccUniqueConflict(const std::string &tab_name, co
         if (!has_live_version) {
             continue;
         }
-        for (auto &index : tab.indexes) {
-            auto new_key = make_index_key(new_rec, index);
-            if (entry.exists && !entry.is_deleted) {
-                auto old_key = make_index_key(entry.head_record, index);
-                if (memcmp(new_key.data(), old_key.data(), index.col_tot_len) == 0) {
-                    throw TransactionAbortException(txn->get_transaction_id(), AbortReason::MVCC_CONFLICT);
-                }
+        if (entry.exists && !entry.is_deleted &&
+            RecordsConflictByLogicalKey(tab, new_rec, entry.head_record)) {
+            throw TransactionAbortException(txn->get_transaction_id(), AbortReason::MVCC_CONFLICT);
+        }
+        for (auto &version : entry.undo_versions) {
+            if (version.is_deleted) {
+                continue;
             }
-            for (auto &version : entry.undo_versions) {
-                if (version.is_deleted) {
-                    continue;
-                }
-                auto old_key = make_index_key(version.record, index);
-                if (memcmp(new_key.data(), old_key.data(), index.col_tot_len) == 0) {
-                    throw TransactionAbortException(txn->get_transaction_id(), AbortReason::MVCC_CONFLICT);
-                }
+            if (RecordsConflictByLogicalKey(tab, new_rec, version.record)) {
+                throw TransactionAbortException(txn->get_transaction_id(), AbortReason::MVCC_CONFLICT);
             }
         }
     }
