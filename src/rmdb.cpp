@@ -43,6 +43,7 @@ auto log_manager = std::make_unique<LogManager>(disk_manager.get());
 auto recovery = std::make_unique<RecoveryManager>(disk_manager.get(), buffer_pool_manager.get(), sm_manager.get());
 auto portal = std::make_unique<Portal>(sm_manager.get());
 auto analyze = std::make_unique<Analyze>(sm_manager.get());
+std::atomic<bool> isolation_output_format{false};
 pthread_mutex_t *buffer_mutex;
 pthread_mutex_t *sockfd_mutex;
 
@@ -152,7 +153,7 @@ void *client_handler(void *sock_fd) {
 
         // 开启事务，初始化系统所需的上下文信息（包括事务对象指针、锁管理器指针、日志管理器指针、存放结果的buffer、记录结果长度的变量）
         Context *context = new Context(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset,
-                                       txn_manager.get(), &session_isolation_level);
+                                       txn_manager.get(), &session_isolation_level, &isolation_output_format);
 
         // 用于判断是否已经调用了yy_delete_buffer来删除buf
         bool finish_analyze = false;
@@ -175,6 +176,9 @@ void *client_handler(void *sock_fd) {
                     std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
                     portal->run(portalStmt, ql_manager.get(), &txn_id, context);
                     portal->drop();
+                    if (std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
+                        isolation_output_format.store(true);
+                    }
                 } catch (TransactionAbortException &e) {
                     // 事务需要回滚，需要把abort信息返回给客户端并写入output.txt文件中
                     std::string str = "abort\n";

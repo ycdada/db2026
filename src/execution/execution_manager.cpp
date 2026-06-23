@@ -78,6 +78,22 @@ static std::string format_select_output(const std::vector<std::string> &captions
     return os.str();
 }
 
+static std::string format_legacy_output(const std::vector<std::string> &captions,
+                                        const std::vector<std::vector<std::string>> &rows) {
+    std::ostringstream os;
+    auto print_record = [&](const std::vector<std::string> &cols) {
+        for (auto &col : cols) {
+            os << "| " << col << " ";
+        }
+        os << "|\n";
+    };
+    print_record(captions);
+    for (auto &row : rows) {
+        print_record(row);
+    }
+    return os.str();
+}
+
 // 主要负责执行DDL语句
 void QlManager::run_mutli_query(std::shared_ptr<Plan> plan, Context *context){
     if (auto x = std::dynamic_pointer_cast<DDLPlan>(plan)) {
@@ -272,7 +288,11 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
 
     std::fstream outfile;
     outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-    outfile << format_select_output(captions, rows);
+    if (context->isolation_output_format_ != nullptr && context->isolation_output_format_->load()) {
+        outfile << format_select_output(captions, rows);
+    } else {
+        outfile << format_legacy_output(captions, rows);
+    }
     outfile.close();
 }
 
