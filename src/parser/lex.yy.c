@@ -1,6 +1,6 @@
-#line 2 "src/parser/lex.yy.c"
+#line 2 "src/parser/lex.yy.cpp"
 
-#line 4 "src/parser/lex.yy.c"
+#line 4 "src/parser/lex.yy.cpp"
 
 #define  YY_INT_ALIGNED short int
 
@@ -709,9 +709,9 @@ char *yytext;
         } \
     }
 
-#line 713 "src/parser/lex.yy.c"
+#line 713 "src/parser/lex.yy.cpp"
 
-#line 715 "src/parser/lex.yy.c"
+#line 715 "src/parser/lex.yy.cpp"
 
 #define INITIAL 0
 #define STATE_COMMENT 1
@@ -949,7 +949,7 @@ YY_DECL
 
 #line 48 "src/parser/lex.l"
     /* block comment */
-#line 953 "src/parser/lex.yy.c"
+#line 953 "src/parser/lex.yy.cpp"
 
 	while ( /*CONSTCOND*/1 )		/* loops until end-of-file is reached */
 		{
@@ -1385,7 +1385,7 @@ YY_RULE_SETUP
 #line 144 "src/parser/lex.l"
 ECHO;
 	YY_BREAK
-#line 1389 "src/parser/lex.yy.c"
+#line 1389 "src/parser/lex.yy.cpp"
 
 	case YY_END_OF_BUFFER:
 		{

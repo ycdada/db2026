@@ -45,7 +45,6 @@ auto portal = std::make_unique<Portal>(sm_manager.get());
 auto analyze = std::make_unique<Analyze>(sm_manager.get());
 std::atomic<bool> isolation_output_format{false};
 pthread_mutex_t *buffer_mutex;
-pthread_mutex_t *sockfd_mutex;
 
 static jmp_buf jmpbuf;
 void sigint_handler(int signo) {
@@ -105,7 +104,7 @@ static void AbortActiveTransaction(txn_id_t *txn_id, Context *context) {
 
 void *client_handler(void *sock_fd) {
     int fd = *((int *)sock_fd);
-    pthread_mutex_unlock(sockfd_mutex);
+    delete (int *)sock_fd;
 
     int i_recvBytes;
     // 接收客户端发送的请求
@@ -250,9 +249,7 @@ void *client_handler(void *sock_fd) {
 void start_server() {
     // init mutex
     buffer_mutex = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
-    sockfd_mutex = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
     pthread_mutex_init(buffer_mutex, nullptr);
-    pthread_mutex_init(sockfd_mutex, nullptr);
 
     int sockfd_server;
     int fd_temp;
@@ -293,7 +290,6 @@ void start_server() {
         }
 
         // Block here. Until server accepts a new connection.
-        pthread_mutex_lock(sockfd_mutex);
         int sockfd = accept(sockfd_server, (struct sockaddr *)(&s_addr_client), (socklen_t *)(&client_length));
         if (sockfd == -1) {
             std::cout << "Accept error!" << std::endl;
@@ -301,7 +297,7 @@ void start_server() {
         }
 
         // 和客户端建立连接，并开启一个线程负责处理客户端请求
-        if (pthread_create(&thread_id, nullptr, &client_handler, (void *)(&sockfd)) != 0) {
+        if (pthread_create(&thread_id, nullptr, &client_handler, (void *)(new int(sockfd))) != 0) {
             std::cout << "Create thread fail!" << std::endl;
             break;  // break while loop
         }

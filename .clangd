@@ -1,0 +1,10 @@
+CompileFlags:
+  Add:
+    - -I./src
+    - -std=c++17
+---
+If:
+  PathMatch: src/parser/.*\.(c|h|hpp)$
+CompileFlags:
+  Add:
+    - -xc++

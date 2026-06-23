@@ -13,6 +13,7 @@ See the Mulan PSL v2 for more details. */
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -22,6 +23,7 @@ See the Mulan PSL v2 for more details. */
 #include "common/common.h"
 #include "transaction/txn_defs.h"
 #include "record/rm_defs.h"
+#include "storage/page.h"
 
 /** 表示此tuple的前一个版本的链接 */
 struct UndoLink {

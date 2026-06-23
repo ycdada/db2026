@@ -37,6 +37,7 @@
 
 #ifndef YY_YY_SRC_PARSER_YACC_TAB_H_INCLUDED
 # define YY_YY_SRC_PARSER_YACC_TAB_H_INCLUDED
+#include "ast.h"
 /* Debug traces.  */
 #ifndef YYDEBUG
 # define YYDEBUG 0
@@ -119,6 +120,11 @@ extern int yydebug;
 #endif
 
 /* Value type.  */
+#if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
+typedef ast::SemValue YYSTYPE;
+# define YYSTYPE_IS_DECLARED 1
+# define YYSTYPE_IS_TRIVIAL 0
+#endif
 
 /* Location type.  */
 #if ! defined YYLTYPE && ! defined YYLTYPE_IS_DECLARED

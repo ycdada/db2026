@@ -2,6 +2,8 @@
 #define yyHEADER_H 1
 #define yyIN_HEADER 1
 
+#include "yacc.tab.h"
+
 #line 6 "src/parser/lex.yy.hpp"
 
 #line 8 "src/parser/lex.yy.hpp"

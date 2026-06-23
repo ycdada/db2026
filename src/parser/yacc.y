@@ -17,6 +17,7 @@ using namespace ast;
 
 // request a pure (reentrant) parser
 %define api.pure full
+%define api.value.type {ast::SemValue}
 // enable location in error handler
 %locations
 // enable verbose syntax error message

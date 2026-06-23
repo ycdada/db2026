@@ -62,6 +62,8 @@ public:
     bool unlock(Transaction* txn, LockDataId lock_data_id);
 
 private:
+    bool lock(Transaction *txn, LockDataId lid, LockMode mode);
+
     std::mutex latch_;      // 用于锁表的并发
     std::unordered_map<LockDataId, LockRequestQueue> lock_table_;   // 全局锁表
 };
