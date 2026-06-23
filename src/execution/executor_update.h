@@ -145,7 +145,6 @@ class UpdateExecutor : public AbstractExecutor {
                                     *old_rec, *new_rec, rid, tab_name_);
                 lsn_t lsn = context_->log_mgr_->add_log_record(&log);
                 context_->txn_->set_prev_lsn(lsn);
-                context_->log_mgr_->flush_log_to_disk();
             }
 
             try {

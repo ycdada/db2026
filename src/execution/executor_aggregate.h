@@ -18,6 +18,7 @@ class AggregateExecutor : public AbstractExecutor {
         bool has_value = false;
         int int_val = 0;
         float float_val = 0;
+        std::string str_val;
     };
 
     struct GroupState {
@@ -68,13 +69,21 @@ class AggregateExecutor : public AbstractExecutor {
                 ((call.type == AGG_MIN) && v < state.int_val)) {
                 state.int_val = v;
             }
-        } else {
+        } else if (meta->type == TYPE_FLOAT) {
             float v = *(float *)(rec.data + meta->offset);
             state.sum += v;
             if (!state.has_value ||
                 ((call.type == AGG_MAX) && v > state.float_val) ||
                 ((call.type == AGG_MIN) && v < state.float_val)) {
                 state.float_val = v;
+            }
+        } else {
+            std::string v(rec.data + meta->offset, meta->len);
+            v.resize(strlen(v.c_str()));
+            if (!state.has_value ||
+                ((call.type == AGG_MAX) && v > state.str_val) ||
+                ((call.type == AGG_MIN) && v < state.str_val)) {
+                state.str_val = std::move(v);
             }
         }
         state.has_value = true;
@@ -91,8 +100,10 @@ class AggregateExecutor : public AbstractExecutor {
             else v.set_float((float)state.sum);
         } else if (call.result_type == TYPE_INT) {
             v.set_int(state.has_value ? state.int_val : 0);
-        } else {
+        } else if (call.result_type == TYPE_FLOAT) {
             v.set_float(state.has_value ? state.float_val : 0);
+        } else {
+            v.set_str(state.has_value ? state.str_val : "");
         }
         return v;
     }

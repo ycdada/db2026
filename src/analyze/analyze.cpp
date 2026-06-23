@@ -314,6 +314,7 @@ void Analyze::analyze_select(const std::shared_ptr<ast::SelectStmt> &x, std::sha
             call.col = resolve_col(agg->col->tab_name, agg->col->col_name);
             auto meta = get_col_meta(call.col);
             call.arg_type = meta.type;
+            call.result_len = meta.len;
         }
 
         if (call.type == AGG_COUNT) {
@@ -323,7 +324,10 @@ void Analyze::analyze_select(const std::shared_ptr<ast::SelectStmt> &x, std::sha
             if (call.is_star) {
                 throw RMDBError("failure");
             }
-            if (call.arg_type != TYPE_INT && call.arg_type != TYPE_FLOAT) {
+            if (call.arg_type == TYPE_STRING && call.type != AGG_MAX && call.type != AGG_MIN) {
+                throw RMDBError("failure");
+            }
+            if (call.arg_type != TYPE_INT && call.arg_type != TYPE_FLOAT && call.arg_type != TYPE_STRING) {
                 throw RMDBError("failure");
             }
             if (call.type == AGG_AVG) {
@@ -331,7 +335,8 @@ void Analyze::analyze_select(const std::shared_ptr<ast::SelectStmt> &x, std::sha
                 call.result_len = sizeof(float);
             } else {
                 call.result_type = call.arg_type;
-                call.result_len = (call.arg_type == TYPE_INT) ? sizeof(int) : sizeof(float);
+                call.result_len = (call.arg_type == TYPE_INT) ? sizeof(int) :
+                                  (call.arg_type == TYPE_FLOAT ? sizeof(float) : call.result_len);
             }
         }
 

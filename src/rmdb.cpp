@@ -15,6 +15,9 @@ See the Mulan PSL v2 for more details. */
 #include <signal.h>
 #include <unistd.h>
 #include <atomic>
+#include <algorithm>
+#include <cctype>
+#include <sstream>
 #include "errors.h"
 #include "optimizer/optimizer.h"
 #include "recovery/log_recovery.h"
@@ -103,6 +106,40 @@ static void AbortActiveTransaction(txn_id_t *txn_id, Context *context) {
     context->txn_ = nullptr;
 }
 
+static std::string trim_command(std::string s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+        s.erase(s.begin());
+    }
+    while (!s.empty() && (std::isspace(static_cast<unsigned char>(s.back())) || s.back() == '\0')) {
+        s.pop_back();
+    }
+    return s;
+}
+
+static std::string lower_command(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+static bool parse_load_command(const std::string &cmd, std::string &file_name, std::string &tab_name) {
+    std::string s = trim_command(cmd);
+    if (!s.empty() && s.back() == ';') {
+        s.pop_back();
+    }
+    std::istringstream iss(s);
+    std::string load_kw;
+    std::string into_kw;
+    if (!(iss >> load_kw >> file_name >> into_kw >> tab_name)) {
+        return false;
+    }
+    std::string extra;
+    if (iss >> extra) {
+        return false;
+    }
+    return lower_command(load_kw) == "load" && lower_command(into_kw) == "into";
+}
+
 void *client_handler(void *sock_fd) {
     int fd = *((int *)sock_fd);
     delete (int *)sock_fd;
@@ -117,6 +154,7 @@ void *client_handler(void *sock_fd) {
     // 记录客户端当前正在执行的事务ID
     txn_id_t txn_id = INVALID_TXN_ID;
     IsolationLevel session_isolation_level = IsolationLevel::READ_COMMITTED;
+    bool output_file_enabled = true;
     std::string output = "establish client connection, sockfd: " + std::to_string(fd) + "\n";
     std::cout << output;
 
@@ -153,7 +191,60 @@ void *client_handler(void *sock_fd) {
 
         // 开启事务，初始化系统所需的上下文信息（包括事务对象指针、锁管理器指针、日志管理器指针、存放结果的buffer、记录结果长度的变量）
         Context *context = new Context(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset,
-                                       txn_manager.get(), &session_isolation_level, &isolation_output_format);
+                                       txn_manager.get(), &session_isolation_level, &isolation_output_format,
+                                       &output_file_enabled);
+
+        std::string raw_cmd = trim_command(data_recv);
+        if (lower_command(raw_cmd) == "set output_file off") {
+            output_file_enabled = false;
+            if (write(fd, data_send, offset + 1) == -1) {
+                break;
+            }
+            continue;
+        }
+        std::string load_file;
+        std::string load_table;
+        if (parse_load_command(raw_cmd, load_file, load_table)) {
+            try {
+                EnsureStatementTransaction(&txn_id, context, session_isolation_level);
+                sm_manager->load_table(load_file, load_table, context);
+            } catch (TransactionAbortException &e) {
+                std::string str = "abort\n";
+                memcpy(data_send, str.c_str(), str.length());
+                data_send[str.length()] = '\0';
+                offset = str.length();
+                AbortActiveTransaction(&txn_id, context);
+                if (output_file_enabled) {
+                    std::fstream outfile;
+                    outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+                    outfile << str;
+                    outfile.close();
+                }
+            } catch (RMDBError &e) {
+                AbortImplicitStatementTransaction(&txn_id, context);
+                memcpy(data_send, e.what(), e.get_msg_len());
+                data_send[e.get_msg_len()] = '\n';
+                data_send[e.get_msg_len() + 1] = '\0';
+                offset = e.get_msg_len() + 1;
+                if (output_file_enabled) {
+                    std::fstream outfile;
+                    outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+                    outfile << "failure\n";
+                    outfile.close();
+                }
+            }
+            if (write(fd, data_send, offset + 1) == -1) {
+                break;
+            }
+            if(context->txn_ != nullptr && context->txn_->get_txn_mode() == false &&
+               context->txn_->get_state() != TransactionState::COMMITTED &&
+               context->txn_->get_state() != TransactionState::ABORTED)
+            {
+                txn_manager->commit(context->txn_, context->log_mgr_);
+                txn_id = INVALID_TXN_ID;
+            }
+            continue;
+        }
 
         // 用于判断是否已经调用了yy_delete_buffer来删除buf
         bool finish_analyze = false;
@@ -190,10 +281,12 @@ void *client_handler(void *sock_fd) {
                     AbortActiveTransaction(&txn_id, context);
                     std::cout << e.GetInfo() << std::endl;
 
-                    std::fstream outfile;
-                    outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-                    outfile << str;
-                    outfile.close();
+                    if (output_file_enabled) {
+                        std::fstream outfile;
+                        outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+                        outfile << str;
+                        outfile.close();
+                    }
                 } catch (RMDBError &e) {
                     // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
                     std::cerr << e.what() << std::endl;
@@ -205,10 +298,12 @@ void *client_handler(void *sock_fd) {
                     offset = e.get_msg_len() + 1;
 
                     // 将报错信息写入output.txt
-                    std::fstream outfile;
-                    outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-                    outfile << "failure\n";
-                    outfile.close();
+                    if (output_file_enabled) {
+                        std::fstream outfile;
+                        outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+                        outfile << "failure\n";
+                        outfile.close();
+                    }
                 }
             }
         } else {
@@ -217,10 +312,12 @@ void *client_handler(void *sock_fd) {
             data_send[str.length()] = '\0';
             offset = str.length();
 
-            std::fstream outfile;
-            outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-            outfile << "failure\n";
-            outfile.close();
+            if (output_file_enabled) {
+                std::fstream outfile;
+                outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+                outfile << "failure\n";
+                outfile.close();
+            }
         }
         if(finish_analyze == false) {
             yy_delete_buffer(buf);

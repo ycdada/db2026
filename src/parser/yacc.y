@@ -24,7 +24,7 @@ using namespace ast;
 %define parse.error verbose
 
 // keywords
-%token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY UNION STATIC_CHECKPOINT
+%token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY UNION STATIC_CHECKPOINT LOAD OUTPUT_FILE OFF
 WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
 EXPLAIN ANALYZE AS ON GROUP HAVING LIMIT COUNT MAX MIN SUM AVG TRANSACTION ISOLATION LEVEL SNAPSHOT SERIALIZABLE
 // non-keywords
@@ -45,7 +45,7 @@ EXPLAIN ANALYZE AS ON GROUP HAVING LIMIT COUNT MAX MIN SUM AVG TRANSACTION ISOLA
 %type <sv_expr> expr
 %type <sv_val> value
 %type <sv_vals> valueList
-%type <sv_str> tbName colName optAlias
+%type <sv_str> tbName colName optAlias fileName
 %type <sv_strs> tableList colNameList
 %type <sv_col> col
 %type <sv_cols> colList group_clause opt_group_clause
@@ -72,6 +72,12 @@ start:
         stmt ';'
     {
         parse_tree = $1;
+        YYACCEPT;
+    }
+    |   SET OUTPUT_FILE OFF
+    {
+        SetKnobType type = OutputFile;
+        parse_tree = std::make_shared<SetStmt>(type, false);
         YYACCEPT;
     }
     |   HELP
@@ -138,6 +144,11 @@ setStmt:
     {
         $$ = std::make_shared<SetIsolationStmt>($5);
     }
+    |   SET OUTPUT_FILE OFF
+    {
+        SetKnobType type = OutputFile;
+        $$ = std::make_shared<SetStmt>(type, false);
+    }
     ;
 
 ddl:
@@ -183,6 +194,10 @@ dml:
     |   queryExpr
     {
         $$ = $1;
+    }
+    |   LOAD fileName INTO tbName
+    {
+        $$ = std::make_shared<LoadStmt>($2, $4);
     }
     |   EXPLAIN ANALYZE queryExpr
     {
@@ -693,4 +708,9 @@ isolation_level:
 tbName: IDENTIFIER;
 
 colName: IDENTIFIER;
+
+fileName:
+        IDENTIFIER { $$ = $1; }
+    |   VALUE_STRING { $$ = $1; }
+    ;
 %%

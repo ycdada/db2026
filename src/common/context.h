@@ -26,11 +26,12 @@ public:
     Context (LockManager *lock_mgr, LogManager *log_mgr,
             Transaction *txn, char *data_send = nullptr, int *offset = &const_offset,
             TransactionManager *txn_mgr = nullptr, IsolationLevel *session_isolation_level = nullptr,
-            std::atomic<bool> *isolation_output_format = nullptr)
+            std::atomic<bool> *isolation_output_format = nullptr, bool *output_file_enabled = nullptr)
         : lock_mgr_(lock_mgr), log_mgr_(log_mgr), txn_(txn),
           data_send_(data_send), offset_(offset), txn_mgr_(txn_mgr),
           session_isolation_level_(session_isolation_level),
-          isolation_output_format_(isolation_output_format) {
+          isolation_output_format_(isolation_output_format),
+          output_file_enabled_(output_file_enabled) {
             ellipsis_ = false;
           }
 
@@ -42,5 +43,6 @@ public:
     TransactionManager *txn_mgr_;
     IsolationLevel *session_isolation_level_;
     std::atomic<bool> *isolation_output_format_;
+    bool *output_file_enabled_;
     bool ellipsis_;
 };

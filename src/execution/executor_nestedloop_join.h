@@ -34,6 +34,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
 
     // 前进到下一个匹配的左右记录对
     void advance_to_next_match() {
+        right_rec_.reset();
         while (!left_->is_end()) {
             // 在当前左记录下查找匹配的右记录
             while (!right_->is_end()) {
@@ -45,6 +46,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
                 memcpy(joined->data + left_->tupleLen(), cur_right->data, right_->tupleLen());
                 if (eval_conds(joined->data, cols_, fed_conds_)) {
                     right_rec_ = std::move(cur_right);
+                    isend = false;
                     return;
                 }
                 right_->nextTuple();
@@ -57,6 +59,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
                 right_->beginTuple();
             }
         }
+        isend = true;
     }
 
    public:
@@ -83,14 +86,16 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             right_->bind_join_key(*left_rec_, left_->cols());
             right_->beginTuple();
             advance_to_next_match();
+        } else {
+            right_rec_.reset();
+            isend = true;
         }
-        isend = left_->is_end();
     }
 
     void nextTuple() override {
+        if (isend) return;
         right_->nextTuple();
         advance_to_next_match();
-        isend = left_->is_end();
     }
 
     bool is_end() const override { return isend; }
@@ -101,6 +106,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> Next() override {
+        if (isend || left_rec_ == nullptr || right_rec_ == nullptr) return nullptr;
         // 拼接当前匹配的左、右记录
         auto rec = std::make_unique<RmRecord>(len_);
         memcpy(rec->data, left_rec_->data, left_->tupleLen());

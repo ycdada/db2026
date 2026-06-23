@@ -41,7 +41,7 @@ enum AggFuncType {
 };
 
 enum SetKnobType {
-    EnableNestLoop, EnableSortMerge
+    EnableNestLoop, EnableSortMerge, OutputFile
 };
 
 enum IsolationLevelType {
@@ -290,6 +290,14 @@ struct TableRef : public TreeNode {
 
     TableRef(std::shared_ptr<TreeNode> derived_query_, std::string alias_) :
             alias(std::move(alias_)), derived_query(std::move(derived_query_)), is_derived(true) {}
+};
+
+struct LoadStmt : public TreeNode {
+    std::string file_name;
+    std::string tab_name;
+
+    LoadStmt(std::string file_name_, std::string tab_name_) :
+            file_name(std::move(file_name_)), tab_name(std::move(tab_name_)) {}
 };
 
 // 题目四：FROM 子句，收集表引用以及 JOIN ... ON 产生的连接条件

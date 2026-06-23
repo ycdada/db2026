@@ -103,6 +103,9 @@ single_op ";"|"("|")"|","|"*"|"+"|"-"|"="|">"|"<"|"."
 "SNAPSHOT" { return SNAPSHOT; }
 "SERIALIZABLE" { return SERIALIZABLE; }
 "STATIC_CHECKPOINT" { return STATIC_CHECKPOINT; }
+"LOAD" { return LOAD; }
+"OUTPUT_FILE" { return OUTPUT_FILE; }
+"OFF" { return OFF; }
 "ENABLE_NESTLOOP" { return ENABLE_NESTLOOP; }
 "ENABLE_SORTMERGE" { return ENABLE_SORTMERGE; }
 "TRUE" {

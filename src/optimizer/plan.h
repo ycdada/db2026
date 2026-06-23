@@ -31,6 +31,7 @@ typedef enum PlanTag{
     T_DropIndex,
     T_SetKnob,
     T_SetIsolation,
+    T_Load,
     T_Insert,
     T_Update,
     T_Delete,
@@ -298,6 +299,18 @@ class SetIsolationPlan : public Plan
             isolation_level_ = isolation_level;
         }
     ast::IsolationLevelType isolation_level_;
+};
+
+class LoadPlan : public Plan
+{
+    public:
+        LoadPlan(std::string file_name, std::string tab_name) {
+            Plan::tag = T_Load;
+            file_name_ = std::move(file_name);
+            tab_name_ = std::move(tab_name);
+        }
+    std::string file_name_;
+    std::string tab_name_;
 };
 
 class plannerInfo{

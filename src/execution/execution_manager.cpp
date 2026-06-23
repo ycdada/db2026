@@ -222,6 +222,12 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
             planner_->set_enable_sortmerge_join(x->bool_value_);
             break;
         }
+        case ast::SetKnobType::OutputFile: {
+            if (context->output_file_enabled_ != nullptr) {
+                *context->output_file_enabled_ = x->bool_value_;
+            }
+            break;
+        }
         default: {
             throw RMDBError("Not implemented!\n");
             break;
@@ -241,6 +247,8 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
         default:
             throw RMDBError("failure");
         }
+    } else if (auto x = std::dynamic_pointer_cast<LoadPlan>(plan)) {
+        sm_manager_->load_table(x->file_name_, x->tab_name_, context);
     }
 }
 
@@ -291,14 +299,16 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     // Print record count into buffer
     RecordPrinter::print_record_count(rows.size(), context);
 
-    std::fstream outfile;
-    outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-    if (context->isolation_output_format_ != nullptr && context->isolation_output_format_->load()) {
-        outfile << format_select_output(captions, rows);
-    } else {
-        outfile << format_legacy_output(captions, rows);
+    if (context->output_file_enabled_ == nullptr || *context->output_file_enabled_) {
+        std::fstream outfile;
+        outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+        if (context->isolation_output_format_ != nullptr && context->isolation_output_format_->load()) {
+            outfile << format_select_output(captions, rows);
+        } else {
+            outfile << format_legacy_output(captions, rows);
+        }
+        outfile.close();
     }
-    outfile.close();
 }
 
 // 执行DML语句
@@ -322,8 +332,10 @@ void QlManager::run_explain(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     *(context->offset_) += out.length();
 
     // 输出到 output.txt（追加）
-    std::fstream outfile;
-    outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-    outfile << out;
-    outfile.close();
+    if (context->output_file_enabled_ == nullptr || *context->output_file_enabled_) {
+        std::fstream outfile;
+        outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+        outfile << out;
+        outfile.close();
+    }
 }

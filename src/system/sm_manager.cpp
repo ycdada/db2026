@@ -13,7 +13,11 @@ See the Mulan PSL v2 for more details. */
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <fstream>
+#include <sstream>
 
 #include "index/ix.h"
 #include "record/rm.h"
@@ -149,6 +153,124 @@ void SmManager::create_static_checkpoint(LogManager* log_manager) {
     ofs << std::max(0, checkpoint_start);
 }
 
+static std::vector<std::string> split_csv_line(const std::string &line) {
+    std::vector<std::string> fields;
+    std::string cur;
+    bool in_quote = false;
+    for (char ch : line) {
+        if (ch == '"') {
+            in_quote = !in_quote;
+        } else if (ch == ',' && !in_quote) {
+            fields.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    fields.push_back(cur);
+    return fields;
+}
+
+static std::string trim_csv_field(std::string s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+        s.erase(s.begin());
+    }
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+        s.pop_back();
+    }
+    if (s.size() >= 2 && ((s.front() == '\'' && s.back() == '\'') || (s.front() == '"' && s.back() == '"'))) {
+        s = s.substr(1, s.size() - 2);
+    }
+    return s;
+}
+
+void SmManager::load_table(const std::string& file_name, const std::string& tab_name, Context* context) {
+    if (!db_.is_table(tab_name)) {
+        throw TableNotFoundError(tab_name);
+    }
+    std::ifstream ifs(file_name);
+    if (!ifs.is_open()) {
+        throw FileNotFoundError(file_name);
+    }
+
+    TabMeta &tab = db_.get_table(tab_name);
+    RmFileHandle *fh = fhs_.at(tab_name).get();
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+        auto fields = split_csv_line(line);
+        if (fields.size() != tab.cols.size()) {
+            throw InvalidValueCountError();
+        }
+
+        RmRecord rec(fh->get_file_hdr().record_size);
+        for (size_t i = 0; i < fields.size(); ++i) {
+            const auto &col = tab.cols[i];
+            std::string field = trim_csv_field(fields[i]);
+            char *dst = rec.data + col.offset;
+            if (col.type == TYPE_INT) {
+                int value = std::stoi(field);
+                memcpy(dst, &value, sizeof(int));
+            } else if (col.type == TYPE_FLOAT) {
+                float value = std::stof(field);
+                memcpy(dst, &value, sizeof(float));
+            } else {
+                if ((int)field.size() > col.len) {
+                    throw StringOverflowError();
+                }
+                memset(dst, 0, col.len);
+                memcpy(dst, field.data(), field.size());
+            }
+        }
+
+        for (auto &index : tab.indexes) {
+            auto ih = ihs_.at(ix_manager_->get_index_name(tab_name, index.cols)).get();
+            std::vector<char> key(index.col_tot_len);
+            int offset = 0;
+            for (int i = 0; i < index.col_num; ++i) {
+                memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
+                offset += index.cols[i].len;
+            }
+            std::vector<Rid> result;
+            if (ih->get_value(key.data(), &result, context ? context->txn_ : nullptr)) {
+                throw RMDBError("Duplicate key in unique index");
+            }
+        }
+
+        Rid rid = fh->insert_record(rec.data, context);
+        if (context != nullptr && context->txn_ != nullptr) {
+            context->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name, rid));
+        }
+        if (context != nullptr && context->txn_ != nullptr && context->log_mgr_ != nullptr) {
+            InsertLogRecord log(context->txn_->get_transaction_id(), rec, rid, tab_name);
+            log.prev_lsn_ = context->txn_->get_prev_lsn();
+            lsn_t lsn = context->log_mgr_->add_log_record(&log);
+            context->txn_->set_prev_lsn(lsn);
+        }
+
+        try {
+            for (auto &index : tab.indexes) {
+                auto ih = ihs_.at(ix_manager_->get_index_name(tab_name, index.cols)).get();
+                std::vector<char> key(index.col_tot_len);
+                int offset = 0;
+                for (int i = 0; i < index.col_num; ++i) {
+                    memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
+                    offset += index.cols[i].len;
+                }
+                ih->insert_entry(key.data(), rid, context ? context->txn_ : nullptr);
+            }
+        } catch (...) {
+            fh->delete_record(rid, context);
+            throw;
+        }
+    }
+}
+
 /**
  * @description: 关闭数据库并把数据落盘
  */
@@ -170,8 +292,11 @@ void SmManager::close_db() {
  */
 void SmManager::show_tables(Context* context) {
     std::fstream outfile;
-    outfile.open(db_.name() + "/output.txt", std::ios::out | std::ios::app);
-    outfile << "| Tables |\n";
+    bool write_output = context == nullptr || context->output_file_enabled_ == nullptr || *context->output_file_enabled_;
+    if (write_output) {
+        outfile.open(db_.name() + "/output.txt", std::ios::out | std::ios::app);
+        outfile << "| Tables |\n";
+    }
     RecordPrinter printer(1);
     printer.print_separator(context);
     printer.print_record({"Tables"}, context);
@@ -179,10 +304,14 @@ void SmManager::show_tables(Context* context) {
     for (auto &entry : db_.tabs_) {
         auto &tab = entry.second;
         printer.print_record({tab.name}, context);
-        outfile << "| " << tab.name << " |\n";
+        if (write_output) {
+            outfile << "| " << tab.name << " |\n";
+        }
     }
     printer.print_separator(context);
-    outfile.close();
+    if (write_output) {
+        outfile.close();
+    }
 }
 
 /**
@@ -211,7 +340,10 @@ void SmManager::desc_table(const std::string& tab_name, Context* context) {
 void SmManager::show_index(const std::string& tab_name, Context* context) {
     TabMeta &tab = db_.get_table(tab_name);
     std::fstream outfile;
-    outfile.open(db_.name() + "/output.txt", std::ios::out | std::ios::app);
+    bool write_output = context == nullptr || context->output_file_enabled_ == nullptr || *context->output_file_enabled_;
+    if (write_output) {
+        outfile.open(db_.name() + "/output.txt", std::ios::out | std::ios::app);
+    }
 
     RecordPrinter printer(3);
     printer.print_separator(context);
@@ -225,10 +357,14 @@ void SmManager::show_index(const std::string& tab_name, Context* context) {
         }
         cols += ")";
         printer.print_record({tab_name, "unique", cols}, context);
-        outfile << "| " << tab_name << " | unique | " << cols << " |\n";
+        if (write_output) {
+            outfile << "| " << tab_name << " | unique | " << cols << " |\n";
+        }
     }
     printer.print_separator(context);
-    outfile.close();
+    if (write_output) {
+        outfile.close();
+    }
 }
 
 /**

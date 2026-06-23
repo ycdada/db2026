@@ -70,6 +70,8 @@ class SmManager {
 
     void create_static_checkpoint(LogManager* log_manager);
 
+    void load_table(const std::string& file_name, const std::string& tab_name, Context* context);
+
     void show_tables(Context* context);
 
     void desc_table(const std::string& tab_name, Context* context);
