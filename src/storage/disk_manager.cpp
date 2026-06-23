@@ -269,7 +269,8 @@ int DiskManager::read_log(char *log_data, int size, int offset) {
     if (log_fd_ == -1) {
         log_fd_ = open_file(LOG_FILE_NAME);
     }
-    int file_size = get_file_size(LOG_FILE_NAME);
+    std::string log_path = fd2path_.count(log_fd_) ? fd2path_.at(log_fd_) : LOG_FILE_NAME;
+    int file_size = get_file_size(log_path);
     if (offset > file_size) {
         return -1;
     }

@@ -10,7 +10,10 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <cstring>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 #include <iostream>
 #include "log_defs.h"
@@ -24,7 +27,8 @@ enum LogType: int {
     DELETE,
     begin,
     commit,
-    ABORT
+    ABORT,
+    CHECKPOINT
 };
 static std::string LogTypeStr[] = {
     "UPDATE",
@@ -32,7 +36,8 @@ static std::string LogTypeStr[] = {
     "DELETE",
     "BEGIN",
     "COMMIT",
-    "ABORT"
+    "ABORT",
+    "CHECKPOINT"
 };
 
 class LogRecord {
@@ -101,14 +106,36 @@ public:
  * TODO: commit操作的日志记录
 */
 class CommitLogRecord: public LogRecord {
-
+public:
+    CommitLogRecord() {
+        log_type_ = LogType::commit;
+        lsn_ = INVALID_LSN;
+        log_tot_len_ = LOG_HEADER_SIZE;
+        log_tid_ = INVALID_TXN_ID;
+        prev_lsn_ = INVALID_LSN;
+    }
+    CommitLogRecord(txn_id_t txn_id, lsn_t prev_lsn) : CommitLogRecord() {
+        log_tid_ = txn_id;
+        prev_lsn_ = prev_lsn;
+    }
 };
 
 /**
  * TODO: abort操作的日志记录
 */
 class AbortLogRecord: public LogRecord {
-
+public:
+    AbortLogRecord() {
+        log_type_ = LogType::ABORT;
+        lsn_ = INVALID_LSN;
+        log_tot_len_ = LOG_HEADER_SIZE;
+        log_tid_ = INVALID_TXN_ID;
+        prev_lsn_ = INVALID_LSN;
+    }
+    AbortLogRecord(txn_id_t txn_id, lsn_t prev_lsn) : AbortLogRecord() {
+        log_tid_ = txn_id;
+        prev_lsn_ = prev_lsn;
+    }
 };
 
 class InsertLogRecord: public LogRecord {
@@ -179,14 +206,129 @@ public:
  * TODO: delete操作的日志记录
 */
 class DeleteLogRecord: public LogRecord {
+public:
+    DeleteLogRecord() {
+        log_type_ = LogType::DELETE;
+        lsn_ = INVALID_LSN;
+        log_tot_len_ = LOG_HEADER_SIZE;
+        log_tid_ = INVALID_TXN_ID;
+        prev_lsn_ = INVALID_LSN;
+        table_name_size_ = 0;
+    }
+    DeleteLogRecord(txn_id_t txn_id, lsn_t prev_lsn, const RmRecord &delete_value, const Rid &rid,
+                    std::string table_name) : DeleteLogRecord() {
+        log_tid_ = txn_id;
+        prev_lsn_ = prev_lsn;
+        delete_value_ = delete_value;
+        rid_ = rid;
+        table_name_ = std::move(table_name);
+        table_name_size_ = table_name_.size();
+        log_tot_len_ += sizeof(int) + delete_value_.size + sizeof(Rid) + sizeof(size_t) + table_name_size_;
+    }
 
+    void serialize(char* dest) const override {
+        LogRecord::serialize(dest);
+        int offset = OFFSET_LOG_DATA;
+        memcpy(dest + offset, &delete_value_.size, sizeof(int));
+        offset += sizeof(int);
+        memcpy(dest + offset, delete_value_.data, delete_value_.size);
+        offset += delete_value_.size;
+        memcpy(dest + offset, &rid_, sizeof(Rid));
+        offset += sizeof(Rid);
+        memcpy(dest + offset, &table_name_size_, sizeof(size_t));
+        offset += sizeof(size_t);
+        memcpy(dest + offset, table_name_.data(), table_name_size_);
+    }
+    void deserialize(const char* src) override {
+        LogRecord::deserialize(src);
+        delete_value_.Deserialize(src + OFFSET_LOG_DATA);
+        int offset = OFFSET_LOG_DATA + sizeof(int) + delete_value_.size;
+        rid_ = *reinterpret_cast<const Rid*>(src + offset);
+        offset += sizeof(Rid);
+        table_name_size_ = *reinterpret_cast<const size_t*>(src + offset);
+        offset += sizeof(size_t);
+        table_name_.assign(src + offset, table_name_size_);
+    }
+
+    RmRecord delete_value_;
+    Rid rid_;
+    std::string table_name_;
+    size_t table_name_size_;
 };
 
 /**
  * TODO: update操作的日志记录
 */
 class UpdateLogRecord: public LogRecord {
+public:
+    UpdateLogRecord() {
+        log_type_ = LogType::UPDATE;
+        lsn_ = INVALID_LSN;
+        log_tot_len_ = LOG_HEADER_SIZE;
+        log_tid_ = INVALID_TXN_ID;
+        prev_lsn_ = INVALID_LSN;
+        table_name_size_ = 0;
+    }
+    UpdateLogRecord(txn_id_t txn_id, lsn_t prev_lsn, const RmRecord &old_value, const RmRecord &new_value,
+                    const Rid &rid, std::string table_name) : UpdateLogRecord() {
+        log_tid_ = txn_id;
+        prev_lsn_ = prev_lsn;
+        old_value_ = old_value;
+        new_value_ = new_value;
+        rid_ = rid;
+        table_name_ = std::move(table_name);
+        table_name_size_ = table_name_.size();
+        log_tot_len_ += sizeof(int) + old_value_.size + sizeof(int) + new_value_.size + sizeof(Rid) +
+                        sizeof(size_t) + table_name_size_;
+    }
 
+    void serialize(char* dest) const override {
+        LogRecord::serialize(dest);
+        int offset = OFFSET_LOG_DATA;
+        memcpy(dest + offset, &old_value_.size, sizeof(int));
+        offset += sizeof(int);
+        memcpy(dest + offset, old_value_.data, old_value_.size);
+        offset += old_value_.size;
+        memcpy(dest + offset, &new_value_.size, sizeof(int));
+        offset += sizeof(int);
+        memcpy(dest + offset, new_value_.data, new_value_.size);
+        offset += new_value_.size;
+        memcpy(dest + offset, &rid_, sizeof(Rid));
+        offset += sizeof(Rid);
+        memcpy(dest + offset, &table_name_size_, sizeof(size_t));
+        offset += sizeof(size_t);
+        memcpy(dest + offset, table_name_.data(), table_name_size_);
+    }
+    void deserialize(const char* src) override {
+        LogRecord::deserialize(src);
+        int offset = OFFSET_LOG_DATA;
+        old_value_.Deserialize(src + offset);
+        offset += sizeof(int) + old_value_.size;
+        new_value_.Deserialize(src + offset);
+        offset += sizeof(int) + new_value_.size;
+        rid_ = *reinterpret_cast<const Rid*>(src + offset);
+        offset += sizeof(Rid);
+        table_name_size_ = *reinterpret_cast<const size_t*>(src + offset);
+        offset += sizeof(size_t);
+        table_name_.assign(src + offset, table_name_size_);
+    }
+
+    RmRecord old_value_;
+    RmRecord new_value_;
+    Rid rid_;
+    std::string table_name_;
+    size_t table_name_size_;
+};
+
+class CheckpointLogRecord: public LogRecord {
+public:
+    CheckpointLogRecord() {
+        log_type_ = LogType::CHECKPOINT;
+        lsn_ = INVALID_LSN;
+        log_tot_len_ = LOG_HEADER_SIZE;
+        log_tid_ = INVALID_TXN_ID;
+        prev_lsn_ = INVALID_LSN;
+    }
 };
 
 /* 日志缓冲区，只有一个buffer，因此需要阻塞地去把日志写入缓冲区中 */
@@ -211,10 +353,12 @@ public:
 /* 日志管理器，负责把日志写入日志缓冲区，以及把日志缓冲区中的内容写入磁盘中 */
 class LogManager {
 public:
-    LogManager(DiskManager* disk_manager) { disk_manager_ = disk_manager; }
-    
+    LogManager(DiskManager* disk_manager) { disk_manager_ = disk_manager; persist_lsn_ = INVALID_LSN; }
+
     lsn_t add_log_to_buffer(LogRecord* log_record);
     void flush_log_to_disk();
+    lsn_t add_log_record(LogRecord* log_record) { return add_log_to_buffer(log_record); }
+    static std::unique_ptr<LogRecord> deserialize_log_record(const char *src, int len);
 
     LogBuffer* get_log_buffer() { return &log_buffer_; }
 

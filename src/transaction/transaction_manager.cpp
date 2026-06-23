@@ -164,6 +164,11 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
         running_txns_.AddTxn(start_ts);
         active_mvcc_txn_count_.fetch_add(1);
     }
+    if (new_txn && log_manager != nullptr) {
+        BeginLogRecord log(txn->get_transaction_id());
+        lsn_t lsn = log_manager->add_log_record(&log);
+        txn->set_prev_lsn(lsn);
+    }
     return txn;
 }
 
@@ -736,6 +741,12 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
 
     // 更新事务状态
     txn->set_state(TransactionState::COMMITTED);
+    if (log_manager != nullptr) {
+        CommitLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
+        lsn_t lsn = log_manager->add_log_record(&log);
+        txn->set_prev_lsn(lsn);
+        log_manager->flush_log_to_disk();
+    }
 }
 
 /**
@@ -823,6 +834,12 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
         lock_set->clear();
 
         txn->set_state(TransactionState::ABORTED);
+        if (log_manager != nullptr) {
+            AbortLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
+            lsn_t lsn = log_manager->add_log_record(&log);
+            txn->set_prev_lsn(lsn);
+            log_manager->flush_log_to_disk();
+        }
         return;
     }
 
@@ -872,4 +889,10 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
 
     // 更新事务状态
     txn->set_state(TransactionState::ABORTED);
+    if (log_manager != nullptr) {
+        AbortLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
+        lsn_t lsn = log_manager->add_log_record(&log);
+        txn->set_prev_lsn(lsn);
+        log_manager->flush_log_to_disk();
+    }
 }

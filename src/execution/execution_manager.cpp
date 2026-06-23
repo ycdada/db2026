@@ -201,6 +201,11 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                 context->txn_ = nullptr;
                 break;
             }
+            case T_StaticCheckpoint:
+            {
+                sm_manager_->create_static_checkpoint(context->log_mgr_);
+                break;
+            }
             default:
                 throw InternalError("Unexpected field type");
                 break;

@@ -58,7 +58,8 @@ static bool is_transaction_control_query(const std::shared_ptr<Query> &query) {
     return std::dynamic_pointer_cast<ast::TxnBegin>(query->parse) != nullptr ||
            std::dynamic_pointer_cast<ast::TxnCommit>(query->parse) != nullptr ||
            std::dynamic_pointer_cast<ast::TxnAbort>(query->parse) != nullptr ||
-           std::dynamic_pointer_cast<ast::TxnRollback>(query->parse) != nullptr;
+           std::dynamic_pointer_cast<ast::TxnRollback>(query->parse) != nullptr ||
+           std::dynamic_pointer_cast<ast::StaticCheckpoint>(query->parse) != nullptr;
 }
 
 static bool is_session_only_query(const std::shared_ptr<Query> &query) {
@@ -342,6 +343,7 @@ int main(int argc, char **argv) {
         }
         // Open database
         sm_manager->open_db(db_name);
+        disk_manager->SetLogFd(disk_manager->open_file(db_name + "/" + LOG_FILE_NAME));
 
         // recovery database
         recovery->analyze();

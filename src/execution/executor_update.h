@@ -140,6 +140,13 @@ class UpdateExecutor : public AbstractExecutor {
             if (context_->txn_ != nullptr) {
                 context_->txn_->append_write_record(new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *old_rec));
             }
+            if (context_ != nullptr && context_->txn_ != nullptr && context_->log_mgr_ != nullptr) {
+                UpdateLogRecord log(context_->txn_->get_transaction_id(), context_->txn_->get_prev_lsn(),
+                                    *old_rec, *new_rec, rid, tab_name_);
+                lsn_t lsn = context_->log_mgr_->add_log_record(&log);
+                context_->txn_->set_prev_lsn(lsn);
+                context_->log_mgr_->flush_log_to_disk();
+            }
 
             try {
                 // 更新前，删除旧索引项

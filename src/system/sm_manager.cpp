@@ -122,6 +122,33 @@ void SmManager::flush_meta() {
     ofs << db_;
 }
 
+void SmManager::create_static_checkpoint(LogManager* log_manager) {
+    std::scoped_lock<std::mutex> lock(checkpoint_latch_);
+    int checkpoint_start = disk_manager_->get_file_size(db_.name() + "/" + LOG_FILE_NAME);
+    if (log_manager != nullptr) {
+        log_manager->flush_log_to_disk();
+        checkpoint_start = disk_manager_->get_file_size(db_.name() + "/" + LOG_FILE_NAME);
+        CheckpointLogRecord checkpoint;
+        log_manager->add_log_record(&checkpoint);
+        log_manager->flush_log_to_disk();
+    }
+
+    for (auto &entry : fhs_) {
+        RmFileHandle *fh = entry.second.get();
+        fh->flush_file_hdr();
+        buffer_pool_manager_->flush_all_pages(fh->GetFd());
+    }
+    for (auto &entry : ihs_) {
+        IxIndexHandle *ih = entry.second.get();
+        ih->flush_file_hdr();
+        buffer_pool_manager_->flush_all_pages(ih->GetFd());
+    }
+    flush_meta();
+
+    std::ofstream ofs(db_.name() + "/" + RESTART_FILE_NAME, std::ios::out | std::ios::trunc);
+    ofs << std::max(0, checkpoint_start);
+}
+
 /**
  * @description: 关闭数据库并把数据落盘
  */

@@ -10,11 +10,14 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <mutex>
+
 #include "index/ix.h"
 #include "record/rm_file_handle.h"
 #include "sm_defs.h"
 #include "sm_meta.h"
 #include "common/context.h"
+#include "recovery/log_manager.h"
 
 class Context;
 
@@ -35,6 +38,7 @@ class SmManager {
     BufferPoolManager* buffer_pool_manager_;
     RmManager* rm_manager_;
     IxManager* ix_manager_;
+    std::mutex checkpoint_latch_;
 
    public:
     SmManager(DiskManager* disk_manager, BufferPoolManager* buffer_pool_manager, RmManager* rm_manager,
@@ -63,6 +67,8 @@ class SmManager {
     void close_db();
 
     void flush_meta();
+
+    void create_static_checkpoint(LogManager* log_manager);
 
     void show_tables(Context* context);
 

@@ -75,6 +75,13 @@ class DeleteExecutor : public AbstractExecutor {
             if (context_->txn_ != nullptr) {
                 context_->txn_->append_write_record(new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec));
             }
+            if (context_ != nullptr && context_->txn_ != nullptr && context_->log_mgr_ != nullptr) {
+                DeleteLogRecord log(context_->txn_->get_transaction_id(), context_->txn_->get_prev_lsn(),
+                                    *rec, rid, tab_name_);
+                lsn_t lsn = context_->log_mgr_->add_log_record(&log);
+                context_->txn_->set_prev_lsn(lsn);
+                context_->log_mgr_->flush_log_to_disk();
+            }
             try {
                 // 删除索引项
                 for (size_t i = 0; i < tab_.indexes.size(); ++i) {

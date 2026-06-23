@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #pragma once
 
 #include <map>
+#include <set>
 #include <unordered_map>
 #include "log_manager.h"
 #include "storage/disk_manager.h"
@@ -35,8 +36,24 @@ public:
     void redo();
     void undo();
 private:
+    void load_logs();
+    int checkpoint_offset();
+    void apply_redo(LogRecord *record);
+    void apply_undo(LogRecord *record);
+    void redo_insert(const std::string &tab_name, const Rid &rid, const RmRecord &record);
+    void redo_delete(const std::string &tab_name, const Rid &rid, const RmRecord &record);
+    void redo_update(const std::string &tab_name, const Rid &rid, const RmRecord &old_record, const RmRecord &new_record);
+    void ensure_record_slot(RmFileHandle *fh, const Rid &rid);
+    bool record_exists(RmFileHandle *fh, const Rid &rid);
+    void insert_indexes(const std::string &tab_name, const RmRecord &record, const Rid &rid);
+    void delete_indexes(const std::string &tab_name, const RmRecord &record);
+
     LogBuffer buffer_;                                              // 读入日志
     DiskManager* disk_manager_;                                     // 用来读写文件
     BufferPoolManager* buffer_pool_manager_;                        // 对页面进行读写
     SmManager* sm_manager_;                                         // 访问数据库元数据
+    std::vector<std::unique_ptr<LogRecord>> logs_;
+    std::set<txn_id_t> committed_txns_;
+    std::set<txn_id_t> active_txns_;
+    std::vector<LogRecord*> undo_logs_;
 };
