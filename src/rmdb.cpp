@@ -85,17 +85,6 @@ static void EnsureStatementTransaction(txn_id_t *txn_id, Context *context,
     }
 }
 
-static void AbortImplicitStatementTransaction(txn_id_t *txn_id, Context *context) {
-    if (context->txn_ == nullptr || context->txn_->get_txn_mode() ||
-        context->txn_->get_state() == TransactionState::COMMITTED ||
-        context->txn_->get_state() == TransactionState::ABORTED) {
-        return;
-    }
-    txn_manager->abort(context->txn_, context->log_mgr_);
-    *txn_id = INVALID_TXN_ID;
-    context->txn_ = nullptr;
-}
-
 static void AbortActiveTransaction(txn_id_t *txn_id, Context *context) {
     if (context->txn_ != nullptr &&
         context->txn_->get_state() != TransactionState::COMMITTED &&
@@ -221,7 +210,7 @@ void *client_handler(void *sock_fd) {
                     outfile.close();
                 }
             } catch (RMDBError &e) {
-                AbortImplicitStatementTransaction(&txn_id, context);
+                AbortActiveTransaction(&txn_id, context);
                 memcpy(data_send, e.what(), e.get_msg_len());
                 data_send[e.get_msg_len()] = '\n';
                 data_send[e.get_msg_len() + 1] = '\0';
@@ -290,7 +279,7 @@ void *client_handler(void *sock_fd) {
                 } catch (RMDBError &e) {
                     // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
                     std::cerr << e.what() << std::endl;
-                    AbortImplicitStatementTransaction(&txn_id, context);
+                    AbortActiveTransaction(&txn_id, context);
 
                     memcpy(data_send, e.what(), e.get_msg_len());
                     data_send[e.get_msg_len()] = '\n';

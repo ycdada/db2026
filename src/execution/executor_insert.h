@@ -60,6 +60,12 @@ class InsertExecutor : public AbstractExecutor {
         // RC 写者在有活跃 SI/SER 事务时也要登记 MVCC 版本（题目9 示例二）。
         bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                               context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
+        bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
+                             (context_->txn_mgr_ == nullptr ||
+                              !context_->txn_mgr_->IsMvccTxn(context_->txn_));
+        if (use_2pl_locks) {
+            context_->lock_mgr_->lock_IX_on_table(context_->txn_, fh_->GetFd());
+        }
         if (mvcc) {
             context_->txn_mgr_->CheckMvccInsertConflict(tab_name_, rec, context_->txn_);
         }

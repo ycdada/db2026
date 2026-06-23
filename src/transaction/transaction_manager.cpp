@@ -734,7 +734,8 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
 
     // 释放所有锁
     auto lock_set = txn->get_lock_set();
-    for (auto &lock_id : *lock_set) {
+    std::vector<LockDataId> locks(lock_set->begin(), lock_set->end());
+    for (auto &lock_id : locks) {
         lock_manager_->unlock(txn, lock_id);
     }
     lock_set->clear();
@@ -828,7 +829,8 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
 	        }
 
         auto lock_set = txn->get_lock_set();
-        for (auto &lock_id : *lock_set) {
+        std::vector<LockDataId> locks(lock_set->begin(), lock_set->end());
+        for (auto &lock_id : locks) {
             lock_manager_->unlock(txn, lock_id);
         }
         lock_set->clear();
@@ -882,7 +884,8 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
 
     // 释放所有锁
     auto lock_set = txn->get_lock_set();
-    for (auto &lock_id : *lock_set) {
+    std::vector<LockDataId> locks(lock_set->begin(), lock_set->end());
+    for (auto &lock_id : locks) {
         lock_manager_->unlock(txn, lock_id);
     }
     lock_set->clear();

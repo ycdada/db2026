@@ -44,6 +44,11 @@ class IndexScanExecutor : public AbstractExecutor {
     std::string join_inner_col_;
     Value join_key_val_;
 
+    bool use_2pl_locks() const {
+        return context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
+               (context_->txn_mgr_ == nullptr || !context_->txn_mgr_->IsMvccTxn(context_->txn_));
+    }
+
     void fill_min_key(char *key, int offset, const ColMeta &col) {
         if (col.type == TYPE_INT) {
             int value = std::numeric_limits<int>::min();
@@ -203,6 +208,9 @@ class IndexScanExecutor : public AbstractExecutor {
                 rec = std::move(physical);
             }
             if (rec != nullptr && eval_conds(rec->data, cols_, fed_conds_)) {
+                if (use_2pl_locks()) {
+                    context_->lock_mgr_->lock_shared_on_record(context_->txn_, scan_->rid(), fh_->GetFd());
+                }
                 cur_rec_ = std::move(rec);
                 rid_ = scan_->rid();
                 return;
@@ -224,6 +232,9 @@ class IndexScanExecutor : public AbstractExecutor {
                 rec = std::move(physical);
             }
             if (rec != nullptr && eval_conds(rec->data, cols_, fed_conds_)) {
+                if (use_2pl_locks()) {
+                    context_->lock_mgr_->lock_shared_on_record(context_->txn_, scan_->rid(), fh_->GetFd());
+                }
                 cur_rec_ = std::move(rec);
                 rid_ = scan_->rid();
                 return;

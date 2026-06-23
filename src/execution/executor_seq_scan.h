@@ -35,6 +35,11 @@ class SeqScanExecutor : public AbstractExecutor {
 
     SmManager *sm_manager_;
 
+    bool use_2pl_locks() const {
+        return context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
+               (context_->txn_mgr_ == nullptr || !context_->txn_mgr_->IsMvccTxn(context_->txn_));
+    }
+
     void register_ser_read_once() {
         if (!ser_read_registered_ && context_ != nullptr && context_->txn_mgr_ != nullptr) {
             context_->txn_mgr_->RegisterSerializableRead(tab_name_, cols_, fed_conds_, returned_rids_, context_->txn_);
@@ -51,6 +56,9 @@ class SeqScanExecutor : public AbstractExecutor {
             visible = std::move(physical);
         }
 	        if (visible != nullptr && eval_conds(visible->data, cols_, fed_conds_)) {
+            if (use_2pl_locks()) {
+                context_->lock_mgr_->lock_shared_on_record(context_->txn_, scan_->rid(), fh_->GetFd());
+            }
 	            cur_rec_ = std::move(visible);
 	            rid_ = scan_->rid();
 	            returned_rids_.push_back(rid_);

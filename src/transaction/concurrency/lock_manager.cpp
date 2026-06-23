@@ -15,36 +15,56 @@ See the Mulan PSL v2 for more details. */
  * @return true 加锁成功
  */
 bool LockManager::lock(Transaction *txn, LockDataId lid, LockMode mode) {
-    // 兼容性检测 lambda
-    auto compatible = [](LockMode req, GroupLockMode grp) -> bool {
-        switch (grp) {
-            case GroupLockMode::NON_LOCK: return true;
-            case GroupLockMode::IS:       return req != LockMode::EXLUCSIVE;
-            case GroupLockMode::IX:       return req == LockMode::INTENTION_SHARED ||
-                                                 req == LockMode::INTENTION_EXCLUSIVE;
-            case GroupLockMode::S:        return req == LockMode::INTENTION_SHARED ||
-                                                 req == LockMode::SHARED;
-            case GroupLockMode::SIX:      return req == LockMode::INTENTION_SHARED;
-            case GroupLockMode::X:        return false;
+    auto compatible = [](LockMode lhs, LockMode rhs) -> bool {
+        if (lhs == LockMode::EXLUCSIVE || rhs == LockMode::EXLUCSIVE) return false;
+        if (lhs == LockMode::S_IX) return rhs == LockMode::INTENTION_SHARED;
+        if (rhs == LockMode::S_IX) return lhs == LockMode::INTENTION_SHARED;
+        if (lhs == LockMode::SHARED) {
+            return rhs == LockMode::SHARED || rhs == LockMode::INTENTION_SHARED;
         }
-        return false;
+        if (rhs == LockMode::SHARED) {
+            return lhs == LockMode::SHARED || lhs == LockMode::INTENTION_SHARED;
+        }
+        return true;
     };
 
-    // 组锁模式升级 lambda
-    auto promote = [](GroupLockMode cur, LockMode req) -> GroupLockMode {
-        if (cur == GroupLockMode::X) return GroupLockMode::X;
-        if (req == LockMode::EXLUCSIVE) return GroupLockMode::X;
+    auto merge_lock = [](LockMode cur, LockMode req) -> LockMode {
+        if (cur == req) return cur;
+        if (cur == LockMode::EXLUCSIVE || req == LockMode::EXLUCSIVE) return LockMode::EXLUCSIVE;
+        if (cur == LockMode::S_IX || req == LockMode::S_IX) return LockMode::S_IX;
+        if ((cur == LockMode::SHARED && req == LockMode::INTENTION_EXCLUSIVE) ||
+            (cur == LockMode::INTENTION_EXCLUSIVE && req == LockMode::SHARED)) {
+            return LockMode::S_IX;
+        }
+        if (cur == LockMode::INTENTION_EXCLUSIVE || req == LockMode::INTENTION_EXCLUSIVE) {
+            return LockMode::INTENTION_EXCLUSIVE;
+        }
+        if (cur == LockMode::SHARED || req == LockMode::SHARED) return LockMode::SHARED;
+        return LockMode::INTENTION_SHARED;
+    };
 
-        if (cur == GroupLockMode::SIX || req == LockMode::S_IX) return GroupLockMode::SIX;
-        if ((cur == GroupLockMode::S && req == LockMode::INTENTION_EXCLUSIVE) ||
-            (cur == GroupLockMode::IX && req == LockMode::SHARED))
-            return GroupLockMode::SIX;
+    auto covers = [&](LockMode held, LockMode req) -> bool {
+        return merge_lock(held, req) == held;
+    };
 
-        if (req == LockMode::SHARED || cur == GroupLockMode::S) return GroupLockMode::S;
-        if (req == LockMode::INTENTION_EXCLUSIVE || cur == GroupLockMode::IX) return GroupLockMode::IX;
-        if (req == LockMode::INTENTION_SHARED || cur == GroupLockMode::IS) return GroupLockMode::IS;
-
-        return GroupLockMode::NON_LOCK;
+    auto recompute_group = [](LockRequestQueue &queue) {
+        bool has_is = false, has_ix = false, has_s = false, has_six = false, has_x = false;
+        for (auto &r : queue.request_queue_) {
+            if (!r.granted_) continue;
+            switch (r.lock_mode_) {
+                case LockMode::INTENTION_SHARED:   has_is = true; break;
+                case LockMode::INTENTION_EXCLUSIVE: has_ix = true; break;
+                case LockMode::SHARED:              has_s = true; break;
+                case LockMode::S_IX:                has_six = true; break;
+                case LockMode::EXLUCSIVE:           has_x = true; break;
+            }
+        }
+        if (has_x) queue.group_lock_mode_ = GroupLockMode::X;
+        else if (has_six || (has_s && has_ix)) queue.group_lock_mode_ = GroupLockMode::SIX;
+        else if (has_s) queue.group_lock_mode_ = GroupLockMode::S;
+        else if (has_ix) queue.group_lock_mode_ = GroupLockMode::IX;
+        else if (has_is) queue.group_lock_mode_ = GroupLockMode::IS;
+        else queue.group_lock_mode_ = GroupLockMode::NON_LOCK;
     };
 
     // 2PL: SHRINKING 阶段不可申请新锁
@@ -56,22 +76,35 @@ bool LockManager::lock(Transaction *txn, LockDataId lid, LockMode mode) {
 
     auto &queue = lock_table_[lid];
 
-    // 如果事务已持有相同锁，直接返回
+    LockRequest *own_request = nullptr;
     for (auto &req : queue.request_queue_) {
         if (req.txn_id_ == txn->get_transaction_id() && req.granted_) {
-            if (req.lock_mode_ == mode) return true;
+            own_request = &req;
+            break;
         }
     }
 
-    // 检查兼容性（no-wait：不兼容则事务回滚）
-    if (!compatible(mode, queue.group_lock_mode_)) {
-        throw TransactionAbortException(txn->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
+    LockMode requested_mode = own_request == nullptr ? mode : merge_lock(own_request->lock_mode_, mode);
+    if (own_request != nullptr && covers(own_request->lock_mode_, mode)) {
+        return true;
     }
 
-    // 授予锁
-    queue.request_queue_.emplace_back(txn->get_transaction_id(), mode);
+    for (auto &req : queue.request_queue_) {
+        if (!req.granted_ || req.txn_id_ == txn->get_transaction_id()) continue;
+        if (!compatible(requested_mode, req.lock_mode_)) {
+            throw TransactionAbortException(txn->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
+        }
+    }
+
+    if (own_request != nullptr) {
+        own_request->lock_mode_ = requested_mode;
+        recompute_group(queue);
+        return true;
+    }
+
+    queue.request_queue_.emplace_back(txn->get_transaction_id(), requested_mode);
     queue.request_queue_.back().granted_ = true;
-    queue.group_lock_mode_ = promote(queue.group_lock_mode_, mode);
+    recompute_group(queue);
     txn->get_lock_set()->insert(lid);
     return true;
 }
