@@ -326,7 +326,7 @@ page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transac
     int new_size = leaf->insert(key, value);
     if (new_size == old_size) {
         buffer_pool_manager_->unpin_page(leaf->get_page_id(), false);
-        return leaf->get_page_no();
+        return IX_NO_PAGE;
     }
     if (leaf->get_size() >= leaf->get_max_size()) {
         IxNodeHandle *new_leaf = split(leaf);

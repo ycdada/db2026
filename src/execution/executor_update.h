@@ -153,6 +153,8 @@ class UpdateExecutor : public AbstractExecutor {
                 context_->txn_->set_prev_lsn(lsn);
             }
 
+            std::vector<std::pair<IxIndexHandle *, std::vector<char>>> deleted_old_index_entries;
+            std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_new_index_entries;
             try {
                 // 更新前，删除旧索引项
                 for (size_t i = 0; i < tab_.indexes.size(); ++i) {
@@ -166,6 +168,7 @@ class UpdateExecutor : public AbstractExecutor {
                         offset += index.cols[j].len;
                     }
                     ih->delete_entry(old_key.data(), context_->txn_);
+                    deleted_old_index_entries.emplace_back(ih, std::move(old_key));
                 }
 
                 // 将更新后的记录写回
@@ -182,11 +185,21 @@ class UpdateExecutor : public AbstractExecutor {
                         memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
                         offset += index.cols[j].len;
                     }
-                    ih->insert_entry(new_key.data(), rid, context_->txn_);
+                    if (ih->insert_entry(new_key.data(), rid, context_->txn_) == IX_NO_PAGE) {
+                        throw RMDBError("Duplicate key in unique index");
+                    }
+                    inserted_new_index_entries.emplace_back(ih, std::move(new_key));
                 }
             } catch (TransactionAbortException &) {
                 throw;
             } catch (...) {
+                for (auto &entry : inserted_new_index_entries) {
+                    entry.first->delete_entry(entry.second.data(), context_->txn_);
+                }
+                fh_->update_record(rid, old_rec->data, context_);
+                for (auto &entry : deleted_old_index_entries) {
+                    entry.first->insert_entry(entry.second.data(), rid, context_->txn_);
+                }
                 if (mvcc) {
                     abort_mvcc_statement();
                 }

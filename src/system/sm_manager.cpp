@@ -280,16 +280,7 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
         }
 
         Rid rid = fh->insert_record(rec.data, context);
-        if (context != nullptr && context->txn_ != nullptr) {
-            context->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name, rid));
-        }
-        if (context != nullptr && context->txn_ != nullptr && context->log_mgr_ != nullptr) {
-            InsertLogRecord log(context->txn_->get_transaction_id(), rec, rid, tab_name);
-            log.prev_lsn_ = context->txn_->get_prev_lsn();
-            lsn_t lsn = context->log_mgr_->add_log_record(&log);
-            context->txn_->set_prev_lsn(lsn);
-        }
-
+        std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_index_entries;
         try {
             for (auto &index : tab.indexes) {
                 auto ih = ihs_.at(ix_manager_->get_index_name(tab_name, index.cols)).get();
@@ -299,11 +290,26 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
                     memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
                     offset += index.cols[i].len;
                 }
-                ih->insert_entry(key.data(), rid, context ? context->txn_ : nullptr);
+                if (ih->insert_entry(key.data(), rid, context ? context->txn_ : nullptr) == IX_NO_PAGE) {
+                    throw RMDBError("Duplicate key in unique index");
+                }
+                inserted_index_entries.emplace_back(ih, std::move(key));
             }
         } catch (...) {
+            for (auto &entry : inserted_index_entries) {
+                entry.first->delete_entry(entry.second.data(), context ? context->txn_ : nullptr);
+            }
             fh->delete_record(rid, context);
             throw;
+        }
+        if (context != nullptr && context->txn_ != nullptr) {
+            context->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name, rid));
+        }
+        if (context != nullptr && context->txn_ != nullptr && context->log_mgr_ != nullptr) {
+            InsertLogRecord log(context->txn_->get_transaction_id(), rec, rid, tab_name);
+            log.prev_lsn_ = context->txn_->get_prev_lsn();
+            lsn_t lsn = context->log_mgr_->add_log_record(&log);
+            context->txn_->set_prev_lsn(lsn);
         }
     }
 }
@@ -517,7 +523,9 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
             if (ih->get_value(key.data(), &result, context ? context->txn_ : nullptr)) {
                 throw RMDBError("Duplicate key in unique index");
             }
-            ih->insert_entry(key.data(), scan.rid(), context ? context->txn_ : nullptr);
+            if (ih->insert_entry(key.data(), scan.rid(), context ? context->txn_ : nullptr) == IX_NO_PAGE) {
+                throw RMDBError("Duplicate key in unique index");
+            }
         }
     } catch (...) {
         ix_manager_->close_index(ih.get());

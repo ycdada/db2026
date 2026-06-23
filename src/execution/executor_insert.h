@@ -91,17 +91,13 @@ class InsertExecutor : public AbstractExecutor {
         } else {
             rid_ = fh_->insert_record(rec.data, context_);
         }
-        if (context_ != nullptr && context_->txn_ != nullptr && context_->log_mgr_ != nullptr) {
-            InsertLogRecord log(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
-            log.prev_lsn_ = context_->txn_->get_prev_lsn();
-            lsn_t lsn = context_->log_mgr_->add_log_record(&log);
-            context_->txn_->set_prev_lsn(lsn);
-        }
-        if (context_->txn_ != nullptr) {
+        bool write_record_appended = false;
+        if (version_writes && context_->txn_ != nullptr) {
             context_->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_));
+            write_record_appended = true;
         }
-
         // Insert into index
+        std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_index_entries;
         try {
             for(auto &index : tab_.indexes) {
                 auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
@@ -111,26 +107,30 @@ class InsertExecutor : public AbstractExecutor {
                     memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
                     offset += index.cols[i].len;
                 }
-                ih->insert_entry(key.data(), rid_, context_->txn_);
+                if (ih->insert_entry(key.data(), rid_, context_->txn_) == IX_NO_PAGE) {
+                    throw RMDBError("Duplicate key in unique index");
+                }
+                inserted_index_entries.emplace_back(ih, std::move(key));
             }
         } catch (...) {
             if (mvcc) {
                 context_->txn_mgr_->abort(context_->txn_, context_->log_mgr_);
             } else {
-                for (auto &index : tab_.indexes) {
-                    auto ih = sm_manager_->ihs_.at(
-                        sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                    std::vector<char> key(index.col_tot_len);
-                    int offset = 0;
-                    for (int i = 0; i < index.col_num; ++i) {
-                        memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
-                        offset += index.cols[i].len;
-                    }
-                    ih->delete_entry(key.data(), context_->txn_);
+                for (auto &entry : inserted_index_entries) {
+                    entry.first->delete_entry(entry.second.data(), context_->txn_);
                 }
                 fh_->delete_record(rid_, context_);
             }
             throw;
+        }
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->log_mgr_ != nullptr) {
+            InsertLogRecord log(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
+            log.prev_lsn_ = context_->txn_->get_prev_lsn();
+            lsn_t lsn = context_->log_mgr_->add_log_record(&log);
+            context_->txn_->set_prev_lsn(lsn);
+        }
+        if (!write_record_appended && context_->txn_ != nullptr) {
+            context_->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_));
         }
         return nullptr;
     }
