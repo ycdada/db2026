@@ -35,9 +35,8 @@
    especially those whose name start with YY_ or yy_.  They are
    private implementation details that can be changed or removed.  */
 
-#ifndef YY_YY_SRC_PARSER_YACC_TAB_H_INCLUDED
-# define YY_YY_SRC_PARSER_YACC_TAB_H_INCLUDED
-#include "ast.h"
+#ifndef YY_YY_HOME_YC_DADA_DB2026_SRC_PARSER_YACC_TAB_H_INCLUDED
+# define YY_YY_HOME_YC_DADA_DB2026_SRC_PARSER_YACC_TAB_H_INCLUDED
 /* Debug traces.  */
 #ifndef YYDEBUG
 # define YYDEBUG 0
@@ -122,8 +121,8 @@ extern int yydebug;
 /* Value type.  */
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 typedef ast::SemValue YYSTYPE;
+# define YYSTYPE_IS_TRIVIAL 1
 # define YYSTYPE_IS_DECLARED 1
-# define YYSTYPE_IS_TRIVIAL 0
 #endif
 
 /* Location type.  */
@@ -146,4 +145,4 @@ struct YYLTYPE
 int yyparse (void);
 
 
-#endif /* !YY_YY_SRC_PARSER_YACC_TAB_H_INCLUDED  */
+#endif /* !YY_YY_HOME_YC_DADA_DB2026_SRC_PARSER_YACC_TAB_H_INCLUDED  */

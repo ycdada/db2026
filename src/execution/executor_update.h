@@ -68,8 +68,8 @@ class UpdateExecutor : public AbstractExecutor {
             }
             auto new_rec = std::make_unique<RmRecord>(fh_->get_file_hdr().record_size, old_rec->data);
 
-	            for (auto &set_clause : set_clauses_) {
-	                const ColMeta *col_meta = nullptr;
+            for (auto &set_clause : set_clauses_) {
+                const ColMeta *col_meta = nullptr;
                 for (auto &col : tab_.cols) {
                     if (col.name == set_clause.lhs.col_name) {
                         col_meta = &col;
@@ -77,8 +77,38 @@ class UpdateExecutor : public AbstractExecutor {
                     }
                 }
                 if (!col_meta) continue;
-	                memcpy(new_rec->data + col_meta->offset, set_clause.rhs.raw->data, col_meta->len);
-	            }
+                if (!set_clause.is_rhs_expr) {
+                    memcpy(new_rec->data + col_meta->offset, set_clause.rhs.raw->data, col_meta->len);
+                    continue;
+                }
+                const ColMeta *rhs_meta = nullptr;
+                for (auto &col : tab_.cols) {
+                    if (col.name == set_clause.rhs_col.col_name) {
+                        rhs_meta = &col;
+                        break;
+                    }
+                }
+                if (!rhs_meta) continue;
+                if (col_meta->type == TYPE_INT) {
+                    int lhs = rhs_meta->type == TYPE_INT
+                                  ? *(int *)(old_rec->data + rhs_meta->offset)
+                                  : static_cast<int>(*(float *)(old_rec->data + rhs_meta->offset));
+                    int rhs = set_clause.rhs.type == TYPE_INT
+                                  ? set_clause.rhs.int_val
+                                  : static_cast<int>(set_clause.rhs.float_val);
+                    int value = set_clause.op == '-' ? lhs - rhs : lhs + rhs;
+                    memcpy(new_rec->data + col_meta->offset, &value, sizeof(int));
+                } else if (col_meta->type == TYPE_FLOAT) {
+                    float lhs = rhs_meta->type == TYPE_INT
+                                    ? static_cast<float>(*(int *)(old_rec->data + rhs_meta->offset))
+                                    : *(float *)(old_rec->data + rhs_meta->offset);
+                    float rhs = set_clause.rhs.type == TYPE_INT
+                                    ? static_cast<float>(set_clause.rhs.int_val)
+                                    : set_clause.rhs.float_val;
+                    float value = set_clause.op == '-' ? lhs - rhs : lhs + rhs;
+                    memcpy(new_rec->data + col_meta->offset, &value, sizeof(float));
+                }
+            }
 
 	            if (mvcc) {
 	                context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *old_rec, context_->txn_);

@@ -509,17 +509,65 @@ def range_reconstruct_after_delete_insert(level="SNAPSHOT ISOLATION"):
 
 def computed_set_diag(level="SNAPSHOT ISOLATION"):
     setup = [
-        "create table cs (id int, v int);",
-        "insert into cs values (1, 10);",
+        "create table cs (id int, v int, f float);",
+        "insert into cs values (1, 10, 1.5);",
     ]
     steps = [
         ("T1", f"set transaction isolation level {level};"),
         ("T1", "begin;"),
         ("T1", "update cs set v = v + 1 where id = 1;"),
+        ("T1", "update cs set v=v+1 where id = 1;"),
+        ("T1", "update cs set f=f-0.5 where id = 1;"),
         ("T1", "commit;"),
         ("T2", "select * from cs;"),
     ]
-    expected = "failure\n" + table(["id", "v"], [(1, 10)])
+    expected = table(["id", "v", "f"], [(1, 12, "1.000000")])
+    return setup, steps, expected
+
+
+def arithmetic_lost_update(level="SNAPSHOT ISOLATION"):
+    setup = [
+        "create table alu (id int, bal int);",
+        "insert into alu values (1, 10);",
+    ]
+    steps = [
+        ("T1", f"set transaction isolation level {level};"),
+        ("T2", f"set transaction isolation level {level};"),
+        ("T1", "begin;"),
+        ("T1", "select * from alu where id = 1;"),
+        ("T2", "begin;"),
+        ("T2", "update alu set bal=bal+10 where id = 1;"),
+        ("T2", "commit;"),
+        ("T1", "select * from alu where id = 1;"),
+        ("T1", "update alu set bal=bal+20 where id = 1;"),
+        ("T1", "commit;"),
+        ("T3", "select * from alu where id = 1;"),
+    ]
+    old = table(["id", "bal"], [(1, 10)])
+    final = table(["id", "bal"], [(1, 20)])
+    return setup, steps, old + old + "abort\n" + final
+
+
+def arithmetic_deadlock(level="SNAPSHOT ISOLATION"):
+    setup = [
+        "create table adl (id int, v int);",
+        "insert into adl values (1, 10);",
+        "insert into adl values (2, 20);",
+    ]
+    steps = [
+        ("T1", f"set transaction isolation level {level};"),
+        ("T2", f"set transaction isolation level {level};"),
+        ("T1", "begin;"),
+        ("T2", "begin;"),
+        ("T1", "update adl set v=v+1 where id = 1;"),
+        ("T2", "update adl set v=v+2 where id = 2;"),
+        ("T1", "update adl set v=v+10 where id = 2;"),
+        ("T2", "update adl set v=v+20 where id = 1;"),
+        ("T1", "commit;"),
+        ("T2", "commit;"),
+        ("T3", "select * from adl;"),
+    ]
+    expected = "abort\n" + table(["id", "v"], [(1, 30), (2, 22)])
     return setup, steps, expected
 
 
@@ -629,6 +677,8 @@ CASES = {
     "range_delete_conflict": range_delete_conflict,
     "range_reconstruct_after_delete_insert": range_reconstruct_after_delete_insert,
     "computed_set_diag": computed_set_diag,
+    "arithmetic_lost_update": arithmetic_lost_update,
+    "arithmetic_deadlock": arithmetic_deadlock,
     "noset_dirty_read": noset_dirty_read,
     "noset_insert_vis": noset_insert_vis,
     "noset_delete_vis": noset_delete_vis,

@@ -128,7 +128,12 @@ private:
         } else if (auto x = std::dynamic_pointer_cast<SetClause>(node)) {
             std::cout << "SET_CLAUSE\n";
             print_val(x->col_name, offset);
-            print_node(x->val, offset);
+            print_node(x->rhs, offset);
+        } else if (auto x = std::dynamic_pointer_cast<ArithmeticExpr>(node)) {
+            std::cout << "ARITH_EXPR\n";
+            print_node(x->lhs, offset);
+            print_val(x->op, offset);
+            print_node(x->rhs, offset);
         } else if (auto x = std::dynamic_pointer_cast<BinaryExpr>(node)) {
             std::cout << "BINARY_EXPR\n";
             print_node(x->lhs, offset);

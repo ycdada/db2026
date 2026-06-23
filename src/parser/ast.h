@@ -188,10 +188,19 @@ struct SelectItem : public TreeNode {
 
 struct SetClause : public TreeNode {
     std::string col_name;
-    std::shared_ptr<Value> val;
+    std::shared_ptr<Expr> rhs;
 
-    SetClause(std::string col_name_, std::shared_ptr<Value> val_) :
-            col_name(std::move(col_name_)), val(std::move(val_)) {}
+    SetClause(std::string col_name_, std::shared_ptr<Expr> rhs_) :
+            col_name(std::move(col_name_)), rhs(std::move(rhs_)) {}
+};
+
+struct ArithmeticExpr : public Expr {
+    std::shared_ptr<Col> lhs;
+    char op;
+    std::shared_ptr<Value> rhs;
+
+    ArithmeticExpr(std::shared_ptr<Col> lhs_, char op_, std::shared_ptr<Value> rhs_) :
+            lhs(std::move(lhs_)), op(op_), rhs(std::move(rhs_)) {}
 };
 
 struct BinaryExpr : public TreeNode {

@@ -184,4 +184,7 @@ struct Condition {
 struct SetClause {
     TabCol lhs;
     Value rhs;
+    bool is_rhs_expr = false;
+    TabCol rhs_col;
+    char op = 0;
 };

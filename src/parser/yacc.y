@@ -288,9 +288,25 @@ value:
     {
         $$ = std::make_shared<IntLit>($1);
     }
+    |   '+' VALUE_INT
+    {
+        $$ = std::make_shared<IntLit>($2);
+    }
+    |   '-' VALUE_INT
+    {
+        $$ = std::make_shared<IntLit>(-$2);
+    }
     |   VALUE_FLOAT
     {
         $$ = std::make_shared<FloatLit>($1);
+    }
+    |   '+' VALUE_FLOAT
+    {
+        $$ = std::make_shared<FloatLit>($2);
+    }
+    |   '-' VALUE_FLOAT
+    {
+        $$ = std::make_shared<FloatLit>(-$2);
     }
     |   VALUE_STRING
     {
@@ -426,9 +442,19 @@ setClauses:
     ;
 
 setClause:
-        colName '=' value
+        colName '=' expr
     {
         $$ = std::make_shared<SetClause>($1, $3);
+    }
+    |   colName '=' col '+' value
+    {
+        $$ = std::make_shared<SetClause>(
+            $1, std::static_pointer_cast<Expr>(std::make_shared<ArithmeticExpr>($3, '+', $5)));
+    }
+    |   colName '=' col '-' value
+    {
+        $$ = std::make_shared<SetClause>(
+            $1, std::static_pointer_cast<Expr>(std::make_shared<ArithmeticExpr>($3, '-', $5)));
     }
     ;
 

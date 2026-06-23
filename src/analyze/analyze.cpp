@@ -44,19 +44,42 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             SetClause set_clause;
             set_clause.lhs.col_name = sv_set_clause->col_name;
             set_clause.lhs.tab_name = x->tab_name;
-            set_clause.rhs = convert_sv_value(sv_set_clause->val);
             // 查找列元数据，进行类型转换和init_raw
             auto col_meta = tab.get_col(sv_set_clause->col_name);
             if (col_meta == tab.cols.end()) {
                 throw ColumnNotFoundError(sv_set_clause->col_name);
             }
-            // INT-FLOAT转换
-            if (col_meta->type == TYPE_FLOAT && set_clause.rhs.type == TYPE_INT) {
-                set_clause.rhs.set_float((float)set_clause.rhs.int_val);
-            } else if (col_meta->type == TYPE_INT && set_clause.rhs.type == TYPE_FLOAT) {
-                set_clause.rhs.set_int((int)set_clause.rhs.float_val);
+            if (auto rhs_val = std::dynamic_pointer_cast<ast::Value>(sv_set_clause->rhs)) {
+                set_clause.rhs = convert_sv_value(rhs_val);
+                // INT-FLOAT转换
+                if (col_meta->type == TYPE_FLOAT && set_clause.rhs.type == TYPE_INT) {
+                    set_clause.rhs.set_float((float)set_clause.rhs.int_val);
+                } else if (col_meta->type == TYPE_INT && set_clause.rhs.type == TYPE_FLOAT) {
+                    set_clause.rhs.set_int((int)set_clause.rhs.float_val);
+                }
+                set_clause.rhs.init_raw(col_meta->len);
+            } else if (auto rhs_expr = std::dynamic_pointer_cast<ast::ArithmeticExpr>(sv_set_clause->rhs)) {
+                auto rhs_col = tab.get_col(rhs_expr->lhs->col_name);
+                if (rhs_col == tab.cols.end()) {
+                    throw ColumnNotFoundError(rhs_expr->lhs->col_name);
+                }
+                if (!rhs_expr->lhs->tab_name.empty() && rhs_expr->lhs->tab_name != x->tab_name) {
+                    throw ColumnNotFoundError(rhs_expr->lhs->tab_name + "." + rhs_expr->lhs->col_name);
+                }
+                if ((col_meta->type != TYPE_INT && col_meta->type != TYPE_FLOAT) ||
+                    (rhs_col->type != TYPE_INT && rhs_col->type != TYPE_FLOAT)) {
+                    throw IncompatibleTypeError(coltype2str(col_meta->type), coltype2str(rhs_col->type));
+                }
+                set_clause.is_rhs_expr = true;
+                set_clause.rhs_col = {.tab_name = x->tab_name, .col_name = rhs_expr->lhs->col_name};
+                set_clause.op = rhs_expr->op;
+                set_clause.rhs = convert_sv_value(rhs_expr->rhs);
+                if (set_clause.rhs.type != TYPE_INT && set_clause.rhs.type != TYPE_FLOAT) {
+                    throw IncompatibleTypeError(coltype2str(rhs_col->type), coltype2str(set_clause.rhs.type));
+                }
+            } else {
+                throw RMDBError("failure");
             }
-            set_clause.rhs.init_raw(col_meta->len);
             query->set_clauses.push_back(set_clause);
         }
 

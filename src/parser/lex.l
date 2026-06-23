@@ -34,12 +34,11 @@ alpha [a-zA-Z]
 digit [0-9]
 white_space [ \t]+
 new_line "\r"|"\n"|"\r\n"
-sign "+"|"-"
 identifier {alpha}(_|{alpha}|{digit})*
-value_int {sign}?{digit}+
-value_float {sign}?{digit}+\.({digit}+)?
+value_int {digit}+
+value_float {digit}+\.({digit}+)?
 value_string '[^']*'
-single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
+single_op ";"|"("|")"|","|"*"|"+"|"-"|"="|">"|"<"|"."
 
 %x STATE_COMMENT
 
@@ -105,9 +104,9 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
 "SERIALIZABLE" { return SERIALIZABLE; }
 "ENABLE_NESTLOOP" { return ENABLE_NESTLOOP; }
 "ENABLE_SORTMERGE" { return ENABLE_SORTMERGE; }
-"TRUE" { 
+"TRUE" {
     yylval->sv_bool = true;
-    return VALUE_BOOL; 
+    return VALUE_BOOL;
 }
 "FALSE" {
     yylval->sv_bool = false;
