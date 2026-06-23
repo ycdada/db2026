@@ -184,18 +184,50 @@ static std::string trim_csv_field(std::string s) {
     return s;
 }
 
+static bool is_absolute_path(const std::string &path) {
+    return !path.empty() && path.front() == '/';
+}
+
+static std::string unquote_load_path(std::string path) {
+    path = trim_csv_field(std::move(path));
+    return path;
+}
+
+static bool is_csv_header(const std::vector<std::string> &fields, const TabMeta &tab) {
+    if (fields.size() != tab.cols.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < fields.size(); ++i) {
+        if (trim_csv_field(fields[i]) != tab.cols[i].name) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void SmManager::load_table(const std::string& file_name, const std::string& tab_name, Context* context) {
     if (!db_.is_table(tab_name)) {
         throw TableNotFoundError(tab_name);
     }
-    std::ifstream ifs(file_name);
+    std::string load_path = unquote_load_path(file_name);
+    std::ifstream ifs;
+    if (is_absolute_path(load_path)) {
+        ifs.open(load_path);
+    } else {
+        ifs.open(db_.name() + "/" + load_path);
+        if (!ifs.is_open()) {
+            ifs.clear();
+            ifs.open(load_path);
+        }
+    }
     if (!ifs.is_open()) {
-        throw FileNotFoundError(file_name);
+        throw FileNotFoundError(load_path);
     }
 
     TabMeta &tab = db_.get_table(tab_name);
     RmFileHandle *fh = fhs_.at(tab_name).get();
     std::string line;
+    bool first_data_line = true;
     while (std::getline(ifs, line)) {
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
@@ -207,6 +239,11 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
         if (fields.size() != tab.cols.size()) {
             throw InvalidValueCountError();
         }
+        if (first_data_line && is_csv_header(fields, tab)) {
+            first_data_line = false;
+            continue;
+        }
+        first_data_line = false;
 
         RmRecord rec(fh->get_file_hdr().record_size);
         for (size_t i = 0; i < fields.size(); ++i) {
