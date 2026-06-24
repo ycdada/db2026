@@ -12,6 +12,7 @@ See the Mulan PSL v2 for more details. */
 
 #include <algorithm>
 #include <limits>
+#include <set>
 
 #include "execution_common.h"
 #include "execution_defs.h"
@@ -36,6 +37,12 @@ class IndexScanExecutor : public AbstractExecutor {
     Rid rid_;
     std::unique_ptr<RecScan> scan_;
     std::unique_ptr<RmRecord> cur_rec_;
+    std::vector<std::pair<Rid, RmRecord>> extra_records_;
+    size_t extra_pos_ = 0;
+    std::set<std::pair<int, int>> seen_rids_;
+    std::vector<Rid> returned_rids_;
+    bool ser_read_registered_ = false;
+    bool end_ = true;
 
     SmManager *sm_manager_;
     bool is_join_inner_ = false;
@@ -47,6 +54,74 @@ class IndexScanExecutor : public AbstractExecutor {
     bool use_2pl_locks() const {
         return context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
                (context_->txn_mgr_ == nullptr || !context_->txn_mgr_->IsMvccTxn(context_->txn_));
+    }
+
+    void register_ser_read_once() {
+        if (!ser_read_registered_ && context_ != nullptr && context_->txn_mgr_ != nullptr) {
+            context_->txn_mgr_->RegisterSerializableRead(tab_name_, cols_, fed_conds_, returned_rids_, context_->txn_);
+            ser_read_registered_ = true;
+        }
+    }
+
+    void load_mvcc_extra_records() {
+        if (context_ != nullptr && context_->txn_mgr_ != nullptr &&
+            context_->txn_mgr_->IsMvccTxn(context_->txn_)) {
+            extra_records_ = context_->txn_mgr_->CollectVisibleVersionRecords(tab_name_, cols_, fed_conds_,
+                                                                              seen_rids_, context_->txn_);
+        } else {
+            extra_records_.clear();
+        }
+        extra_pos_ = 0;
+    }
+
+    bool load_next_extra() {
+        if (extra_pos_ >= extra_records_.size()) {
+            return false;
+        }
+        rid_ = extra_records_[extra_pos_].first;
+        cur_rec_ = std::make_unique<RmRecord>(extra_records_[extra_pos_].second);
+        returned_rids_.push_back(rid_);
+        end_ = false;
+        return true;
+    }
+
+    bool load_visible_index_current() {
+        auto rid = scan_->rid();
+        seen_rids_.insert({rid.page_no, rid.slot_no});
+        auto physical = fh_->get_record(rid, context_);
+        std::unique_ptr<RmRecord> rec;
+        if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+            rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, rid, *physical, context_->txn_);
+        } else {
+            rec = std::move(physical);
+        }
+        if (rec != nullptr && eval_conds(rec->data, cols_, fed_conds_)) {
+            if (use_2pl_locks()) {
+                context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid, fh_->GetFd());
+            }
+            cur_rec_ = std::move(rec);
+            rid_ = rid;
+            returned_rids_.push_back(rid_);
+            end_ = false;
+            return true;
+        }
+        return false;
+    }
+
+    void advance_to_next_match() {
+        cur_rec_ = nullptr;
+        while (scan_ != nullptr && !scan_->is_end()) {
+            if (load_visible_index_current()) {
+                return;
+            }
+            scan_->next();
+        }
+        load_mvcc_extra_records();
+        if (load_next_extra()) {
+            return;
+        }
+        end_ = true;
+        register_ser_read_once();
     }
 
     void fill_min_key(char *key, int offset, const ColMeta &col) {
@@ -127,10 +202,18 @@ class IndexScanExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
+        register_ser_read_once();
         fed_conds_ = conds_;
         if (is_join_inner_) {
             if (!join_key_bound_) {
                 scan_ = nullptr;
+                cur_rec_ = nullptr;
+                extra_records_.clear();
+                extra_pos_ = 0;
+                seen_rids_.clear();
+                returned_rids_.clear();
+                ser_read_registered_ = false;
+                end_ = true;
                 return;
             }
             Condition cond;
@@ -140,6 +223,13 @@ class IndexScanExecutor : public AbstractExecutor {
             cond.rhs_val = join_key_val_;
             fed_conds_.push_back(cond);
         }
+        returned_rids_.clear();
+        ser_read_registered_ = false;
+        seen_rids_.clear();
+        extra_records_.clear();
+        extra_pos_ = 0;
+        cur_rec_ = nullptr;
+        end_ = true;
         auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols)).get();
         std::vector<char> lower_key(index_meta_.col_tot_len);
         std::vector<char> upper_key(index_meta_.col_tot_len);
@@ -198,60 +288,38 @@ class IndexScanExecutor : public AbstractExecutor {
                         : ih->leaf_end();
 
         scan_ = std::make_unique<IxScan>(ih, lower, upper, sm_manager_->get_bpm());
-        cur_rec_ = nullptr;
-        while (!scan_->is_end()) {
-            auto physical = fh_->get_record(scan_->rid(), context_);
-            std::unique_ptr<RmRecord> rec;
-            if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
-                rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, scan_->rid(), *physical, context_->txn_);
-            } else {
-                rec = std::move(physical);
-            }
-            if (rec != nullptr && eval_conds(rec->data, cols_, fed_conds_)) {
-                if (use_2pl_locks()) {
-                    context_->lock_mgr_->lock_shared_on_record(context_->txn_, scan_->rid(), fh_->GetFd());
-                }
-                cur_rec_ = std::move(rec);
-                rid_ = scan_->rid();
-                return;
-            }
-            scan_->next();
-        }
+        advance_to_next_match();
     }
 
     void nextTuple() override {
-        if (scan_ == nullptr) return;
-        scan_->next();
-        cur_rec_ = nullptr;
-        while (!scan_->is_end()) {
-            auto physical = fh_->get_record(scan_->rid(), context_);
-            std::unique_ptr<RmRecord> rec;
-            if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
-                rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, scan_->rid(), *physical, context_->txn_);
-            } else {
-                rec = std::move(physical);
-            }
-            if (rec != nullptr && eval_conds(rec->data, cols_, fed_conds_)) {
-                if (use_2pl_locks()) {
-                    context_->lock_mgr_->lock_shared_on_record(context_->txn_, scan_->rid(), fh_->GetFd());
-                }
-                cur_rec_ = std::move(rec);
-                rid_ = scan_->rid();
+        if (end_) return;
+        if (scan_ != nullptr && !scan_->is_end()) {
+            scan_->next();
+            advance_to_next_match();
+            return;
+        }
+        if (extra_pos_ < extra_records_.size()) {
+            extra_pos_++;
+            if (load_next_extra()) {
                 return;
             }
-            scan_->next();
         }
+        cur_rec_ = nullptr;
+        end_ = true;
+        register_ser_read_once();
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        if (scan_ == nullptr || scan_->is_end()) return nullptr;
+        if (end_ || cur_rec_ == nullptr) return nullptr;
         rows_++;
         return std::make_unique<RmRecord>(*cur_rec_);
     }
 
     bool is_end() const override {
-        return scan_ == nullptr || scan_->is_end();
+        return end_;
     }
+
+    void finish() override { register_ser_read_once(); }
 
     const std::vector<ColMeta> &cols() const override { return cols_; }
 

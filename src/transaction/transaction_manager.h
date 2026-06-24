@@ -12,10 +12,12 @@ See the Mulan PSL v2 for more details. */
 
 #include <atomic>
 #include <unordered_map>
+#include <unordered_set>
 #include <optional>
 #include <functional>
 #include <shared_mutex>
 #include <set>
+#include <utility>
 
 #include "transaction.h"
 #include "watermark.h"
@@ -136,6 +138,9 @@ public:
     std::unique_ptr<RmRecord> GetVisibleRecord(const std::string &tab_name, const Rid &rid,
                                                const RmRecord &physical, Transaction *txn);
     bool IsVisible(const std::string &tab_name, const Rid &rid, const RmRecord &physical, Transaction *txn);
+    std::vector<std::pair<Rid, RmRecord>> CollectVisibleVersionRecords(
+        const std::string &tab_name, const std::vector<ColMeta> &cols, const std::vector<Condition> &conds,
+        const std::set<std::pair<int, int>> &seen_rids, Transaction *txn);
 	    void MvccInsert(const std::string &tab_name, const Rid &rid, const RmRecord &new_rec, Transaction *txn);
 	    void CheckMvccInsertConflict(const std::string &tab_name, const RmRecord &new_rec, Transaction *txn);
 	    void CheckMvccUniqueConflict(const std::string &tab_name, const RmRecord &new_rec, Transaction *txn,
@@ -176,6 +181,7 @@ private:
 
     std::atomic<timestamp_t> last_commit_ts_{0};    // 最后提交的时间戳,仅用于MVCC
     std::atomic<int> active_mvcc_txn_count_{0};
+    std::atomic<uint64_t> gc_commit_counter_{0};
     Watermark running_txns_{0};             // 存储所有正在运行事务的读取时间戳，以便于垃圾回收，仅用于MVCC
 
     struct MvccVersion {
@@ -217,6 +223,8 @@ private:
 
     std::mutex mvcc_latch_;
 	    std::unordered_map<std::string, MvccEntry> mvcc_versions_;
+	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_table_keys_;
+	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_index_compensation_keys_;
 	    std::unordered_map<txn_id_t, std::vector<PredicateRead>> serializable_reads_;
 	    std::set<std::pair<txn_id_t, txn_id_t>> rw_edges_;
 	    std::unordered_map<txn_id_t, std::set<txn_id_t>> rw_in_;

@@ -47,6 +47,17 @@ void delete_index_entries(SmManager *sm_manager, const std::string &tab_name, co
     }
 }
 
+bool index_keys_changed(const TabMeta &tab, const RmRecord &old_rec, const RmRecord &new_rec) {
+    for (auto &index : tab.indexes) {
+        auto old_key = make_index_key(old_rec, index);
+        auto new_key = make_index_key(new_rec, index);
+        if (old_key != new_key) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool eval_txn_conds(const char *rec_data, const std::vector<ColMeta> &cols,
                     const std::vector<Condition> &conds) {
     for (auto &cond : conds) {
@@ -165,11 +176,6 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
         running_txns_.AddTxn(start_ts);
         active_mvcc_txn_count_.fetch_add(1);
     }
-    if (new_txn && log_manager != nullptr) {
-        BeginLogRecord log(txn->get_transaction_id());
-        lsn_t lsn = log_manager->add_log_record(&log);
-        txn->set_prev_lsn(lsn);
-    }
     return txn;
 }
 
@@ -196,6 +202,9 @@ TransactionManager::MvccEntry &TransactionManager::EnsureMvccEntryLocked(
     std::string key = MvccKey(tab_name, rid);
     auto [it, inserted] = mvcc_versions_.try_emplace(key);
     auto &entry = it->second;
+    if (inserted) {
+        mvcc_table_keys_[tab_name].insert(key);
+    }
     if (inserted && physical != nullptr) {
         entry.exists = true;
         entry.is_deleted = false;
@@ -276,12 +285,97 @@ bool TransactionManager::IsVisible(const std::string &tab_name, const Rid &rid,
     return GetVisibleRecord(tab_name, rid, physical, txn) != nullptr;
 }
 
+std::vector<std::pair<Rid, RmRecord>> TransactionManager::CollectVisibleVersionRecords(
+    const std::string &tab_name, const std::vector<ColMeta> &cols, const std::vector<Condition> &conds,
+    const std::set<std::pair<int, int>> &seen_rids, Transaction *txn) {
+    std::vector<std::pair<Rid, RmRecord>> records;
+    if (!IsMvccTxn(txn)) {
+        return records;
+    }
+
+    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    auto table_it = mvcc_index_compensation_keys_.find(tab_name);
+    if (table_it == mvcc_index_compensation_keys_.end()) {
+        return records;
+    }
+    for (auto &key : table_it->second) {
+        auto entry_it = mvcc_versions_.find(key);
+        if (entry_it == mvcc_versions_.end()) {
+            continue;
+        }
+        auto &entry_pair = *entry_it;
+        auto &entry = entry_pair.second;
+        if (!entry.has_head_record) {
+            continue;
+        }
+        if (seen_rids.count({entry.rid.page_no, entry.rid.slot_no}) != 0) {
+            continue;
+        }
+        auto visible = VisibleRecordLocked(entry_pair.first, entry, entry.head_record, txn);
+        if (!visible.has_value() || !eval_txn_conds(visible->data, cols, conds)) {
+            continue;
+        }
+        records.emplace_back(entry.rid, *visible);
+    }
+    return records;
+}
+
 timestamp_t TransactionManager::GetWatermark() {
     return running_txns_.GetWatermark();
 }
 
 void TransactionManager::GarbageCollection() {
     std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    timestamp_t watermark = running_txns_.GetWatermark();
+    std::vector<std::string> removable_entries;
+    for (auto &entry_pair : mvcc_versions_) {
+        auto &entry = entry_pair.second;
+        if (entry.writer_txn != INVALID_TXN_ID) {
+            continue;
+        }
+
+        if (!entry.undo_versions.empty()) {
+            int keep_idx = -1;
+            for (int i = static_cast<int>(entry.undo_versions.size()) - 1; i >= 0; --i) {
+                auto &version = entry.undo_versions[i];
+                if (version.writer_txn == INVALID_TXN_ID && version.commit_ts <= watermark) {
+                    keep_idx = i;
+                    break;
+                }
+            }
+            if (keep_idx >= 0) {
+                entry.undo_versions.erase(entry.undo_versions.begin(), entry.undo_versions.begin() + keep_idx);
+            }
+            if (entry.commit_ts <= watermark) {
+                entry.undo_versions.clear();
+            }
+        }
+
+        if (entry.exists && !entry.is_deleted && entry.commit_ts <= watermark && entry.undo_versions.empty()) {
+            removable_entries.push_back(entry_pair.first);
+        }
+    }
+    for (auto &key : removable_entries) {
+        auto it = mvcc_versions_.find(key);
+        if (it == mvcc_versions_.end()) {
+            continue;
+        }
+        auto table_it = mvcc_table_keys_.find(it->second.tab_name);
+        if (table_it != mvcc_table_keys_.end()) {
+            table_it->second.erase(key);
+            if (table_it->second.empty()) {
+                mvcc_table_keys_.erase(table_it);
+            }
+        }
+        auto compensation_it = mvcc_index_compensation_keys_.find(it->second.tab_name);
+        if (compensation_it != mvcc_index_compensation_keys_.end()) {
+            compensation_it->second.erase(key);
+            if (compensation_it->second.empty()) {
+                mvcc_index_compensation_keys_.erase(compensation_it);
+            }
+        }
+        mvcc_versions_.erase(it);
+    }
     CleanupSerializableStateLocked();
 }
 
@@ -557,6 +651,10 @@ void TransactionManager::MvccUpdate(const std::string &tab_name, const Rid &rid,
     entry.last_writer_txn = txn->get_transaction_id();
     entry.has_head_record = true;
     entry.head_record = new_rec;
+    const TabMeta &tab = sm_manager_->db_.get_table(tab_name);
+    if (index_keys_changed(tab, old_rec, new_rec)) {
+        mvcc_index_compensation_keys_[tab_name].insert(MvccKey(tab_name, rid));
+    }
 }
 
 void TransactionManager::MvccDelete(const std::string &tab_name, const Rid &rid,
@@ -573,6 +671,7 @@ void TransactionManager::MvccDelete(const std::string &tab_name, const Rid &rid,
     entry.last_writer_txn = txn->get_transaction_id();
     entry.has_head_record = true;
     entry.head_record = old_rec;
+    mvcc_index_compensation_keys_[tab_name].insert(MvccKey(tab_name, rid));
 }
 
 void TransactionManager::RegisterSerializableRead(const std::string &tab_name, const std::vector<ColMeta> &cols,
@@ -725,9 +824,13 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
             std::scoped_lock<std::mutex> lock(mvcc_latch_);
             CleanupSerializableStateLocked();
         }
+        if ((gc_commit_counter_.fetch_add(1) & 1023U) == 1023U) {
+            GarbageCollection();
+        }
     }
 
     auto write_set = txn->get_write_set();
+    bool has_writes = !write_set->empty() || !txn->mvcc_write_keys().empty();
     while (!write_set->empty()) {
         delete write_set->back();
         write_set->pop_back();
@@ -743,7 +846,7 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
 
     // 更新事务状态
     txn->set_state(TransactionState::COMMITTED);
-    if (log_manager != nullptr) {
+    if (has_writes && log_manager != nullptr) {
         CommitLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
         lsn_t lsn = log_manager->add_log_record(&log);
         txn->set_prev_lsn(lsn);
@@ -773,6 +876,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             records.push_back(write_set->back());
             write_set->pop_back();
         }
+        bool has_writes = !records.empty() || !txn->mvcc_write_keys().empty();
 
         std::unordered_set<std::string> processed_keys;
         for (auto *write_record : records) {
@@ -815,6 +919,20 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             if (entry.had_entry_on_abort && entry.restore_snapshot != nullptr) {
                 mvcc_versions_[key] = *entry.restore_snapshot;
             } else {
+                auto table_it = mvcc_table_keys_.find(tab_name);
+                if (table_it != mvcc_table_keys_.end()) {
+                    table_it->second.erase(key);
+                    if (table_it->second.empty()) {
+                        mvcc_table_keys_.erase(table_it);
+                    }
+                }
+                auto compensation_it = mvcc_index_compensation_keys_.find(tab_name);
+                if (compensation_it != mvcc_index_compensation_keys_.end()) {
+                    compensation_it->second.erase(key);
+                    if (compensation_it->second.empty()) {
+                        mvcc_index_compensation_keys_.erase(compensation_it);
+                    }
+                }
                 mvcc_versions_.erase(it);
             }
             delete write_record;
@@ -842,7 +960,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
         lock_set->clear();
 
         txn->set_state(TransactionState::ABORTED);
-        if (log_manager != nullptr) {
+        if (has_writes && log_manager != nullptr) {
             AbortLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
             lsn_t lsn = log_manager->add_log_record(&log);
             txn->set_prev_lsn(lsn);
@@ -852,6 +970,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     }
 
     auto write_set = txn->get_write_set();
+    bool has_writes = !write_set->empty();
     while (!write_set->empty()) {
         WriteRecord *write_record = write_set->back();
         write_set->pop_back();
@@ -898,7 +1017,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
 
     // 更新事务状态
     txn->set_state(TransactionState::ABORTED);
-    if (log_manager != nullptr) {
+    if (has_writes && log_manager != nullptr) {
         AbortLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
         lsn_t lsn = log_manager->add_log_record(&log);
         txn->set_prev_lsn(lsn);
