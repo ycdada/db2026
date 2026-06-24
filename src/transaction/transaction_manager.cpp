@@ -13,6 +13,7 @@ See the Mulan PSL v2 for more details. */
 #include "system/sm_manager.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 std::unordered_map<txn_id_t, Transaction *> TransactionManager::txn_map = {};
 
@@ -773,12 +774,17 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             write_set->pop_back();
         }
 
+        std::unordered_set<std::string> processed_keys;
         for (auto *write_record : records) {
             const std::string &tab_name = write_record->GetTableName();
             TabMeta &tab = sm_manager_->db_.get_table(tab_name);
             RmFileHandle *fh = sm_manager_->fhs_.at(tab_name).get();
             Rid rid = write_record->GetRid();
             std::string key = MvccKey(tab_name, rid);
+            if (!processed_keys.insert(key).second) {
+                delete write_record;
+                continue;
+            }
 
             std::scoped_lock<std::mutex> lock(mvcc_latch_);
             auto it = mvcc_versions_.find(key);
