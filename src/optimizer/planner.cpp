@@ -323,7 +323,11 @@ std::shared_ptr<Plan> Planner::build_source_scan_plan(const QuerySource *source,
 
     std::vector<std::string> index_col_names;
     PlanTag tag = T_SeqScan;
-    if (is_join_inner) {
+    bool mvcc = context != nullptr && context->txn_mgr_ != nullptr &&
+                context->txn_mgr_->IsMvccTxn(context->txn_);
+    if (mvcc) {
+        index_col_names.clear();
+    } else if (is_join_inner) {
         index_col_names = {inner_col};
         tag = T_IndexScan;
     } else if (get_index_cols(table, conds, index_col_names)) {
@@ -517,7 +521,9 @@ std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> quer
 
         TabCol outer_col;
         std::string inner_col;
-	        bool use_inlj = source != nullptr && !source->is_derived &&
+	        bool mvcc = context != nullptr && context->txn_mgr_ != nullptr &&
+	                    context->txn_mgr_->IsMvccTxn(context->txn_);
+	        bool use_inlj = !mvcc && source != nullptr && !source->is_derived &&
 	                        choose_inlj_key(sm_manager_, tab, joined, join_conds, outer_col, inner_col);
 
         std::shared_ptr<Plan> leaf;
