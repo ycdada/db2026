@@ -24,6 +24,21 @@ class InsertExecutor : public AbstractExecutor {
     Rid rid_;                       // 插入的位置，由于系统默认插入时不指定位置，因此当前rid_在插入后才赋值
     SmManager *sm_manager_;
 
+    struct IndexInsertEntry {
+        IxIndexHandle *ih;
+        std::vector<char> key;
+    };
+
+    std::vector<char> make_index_key(const RmRecord &rec, const IndexMeta &index) const {
+        std::vector<char> key(index.col_tot_len);
+        int offset = 0;
+        for (int i = 0; i < index.col_num; ++i) {
+            memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
+            offset += index.cols[i].len;
+        }
+        return key;
+    }
+
    public:
     InsertExecutor(SmManager *sm_manager, const std::string &tab_name, std::vector<Value> values, Context *context) {
         sm_manager_ = sm_manager;
@@ -69,18 +84,16 @@ class InsertExecutor : public AbstractExecutor {
         if (mvcc) {
             context_->txn_mgr_->CheckMvccInsertConflict(tab_name_, rec, context_->txn_);
         }
+        std::vector<IndexInsertEntry> index_entries;
+        index_entries.reserve(tab_.indexes.size());
         for (auto &index : tab_.indexes) {
             auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-            std::vector<char> key(index.col_tot_len);
-            int offset = 0;
-            for (int i = 0; i < index.col_num; ++i) {
-                memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
-                offset += index.cols[i].len;
-            }
+            auto key = make_index_key(rec, index);
             std::vector<Rid> result;
             if (ih->get_value(key.data(), &result, context_->txn_)) {
                 throw RMDBError("Duplicate key in unique index");
             }
+            index_entries.push_back({ih, std::move(key)});
         }
         // Insert into record file
         if (version_writes) {
@@ -97,27 +110,20 @@ class InsertExecutor : public AbstractExecutor {
             write_record_appended = true;
         }
         // Insert into index
-        std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_index_entries;
+        std::vector<IndexInsertEntry *> inserted_index_entries;
         try {
-            for(auto &index : tab_.indexes) {
-                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                std::vector<char> key(index.col_tot_len);
-                int offset = 0;
-                for(int i = 0; i < index.col_num; ++i) {
-                    memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
-                    offset += index.cols[i].len;
-                }
-                if (ih->insert_entry(key.data(), rid_, context_->txn_) == IX_NO_PAGE) {
+            for (auto &entry : index_entries) {
+                if (entry.ih->insert_entry(entry.key.data(), rid_, context_->txn_) == IX_NO_PAGE) {
                     throw RMDBError("Duplicate key in unique index");
                 }
-                inserted_index_entries.emplace_back(ih, std::move(key));
+                inserted_index_entries.push_back(&entry);
             }
         } catch (...) {
             if (mvcc) {
                 context_->txn_mgr_->abort(context_->txn_, context_->log_mgr_);
             } else {
                 for (auto &entry : inserted_index_entries) {
-                    entry.first->delete_entry(entry.second.data(), context_->txn_);
+                    entry->ih->delete_entry(entry->key.data(), context_->txn_);
                 }
                 fh_->delete_record(rid_, context_);
             }

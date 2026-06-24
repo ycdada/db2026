@@ -129,6 +129,7 @@ public:
     /** @brief 垃圾回收。仅在所有事务都未访问时调用。 */
     void GarbageCollection();
     bool HasActiveMvccTransactions() const;
+    bool HasMvccVersions() const;
 
     bool IsMvccTxn(Transaction *txn) const;
     // 当写者本身是 SI/SER，或当前存在活跃的 SI/SER 事务时，写操作必须保留旧版本，
@@ -221,7 +222,8 @@ private:
         std::set<std::string> record_keys;
     };
 
-    std::mutex mvcc_latch_;
+    mutable std::shared_mutex mvcc_latch_;
+    std::atomic<size_t> mvcc_version_count_{0};
 	    std::unordered_map<std::string, MvccEntry> mvcc_versions_;
 	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_table_keys_;
 	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_index_compensation_keys_;

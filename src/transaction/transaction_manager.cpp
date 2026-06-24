@@ -193,6 +193,10 @@ bool TransactionManager::HasActiveMvccTransactions() const {
     return active_mvcc_txn_count_.load() > 0;
 }
 
+bool TransactionManager::HasMvccVersions() const {
+    return mvcc_version_count_.load(std::memory_order_acquire) > 0;
+}
+
 std::string TransactionManager::MvccKey(const std::string &tab_name, const Rid &rid) const {
     return tab_name + "#" + std::to_string(rid.page_no) + "#" + std::to_string(rid.slot_no);
 }
@@ -204,6 +208,7 @@ TransactionManager::MvccEntry &TransactionManager::EnsureMvccEntryLocked(
     auto &entry = it->second;
     if (inserted) {
         mvcc_table_keys_[tab_name].insert(key);
+        mvcc_version_count_.fetch_add(1, std::memory_order_release);
     }
     if (inserted && physical != nullptr) {
         entry.exists = true;
@@ -267,7 +272,10 @@ std::optional<RmRecord> TransactionManager::VisibleRecordLocked(
 
 std::unique_ptr<RmRecord> TransactionManager::GetVisibleRecord(const std::string &tab_name, const Rid &rid,
                                                                const RmRecord &physical, Transaction *txn) {
-    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    if (!HasMvccVersions()) {
+        return std::make_unique<RmRecord>(physical);
+    }
+    std::shared_lock<std::shared_mutex> lock(mvcc_latch_);
     std::string key = MvccKey(tab_name, rid);
     auto it = mvcc_versions_.find(key);
     if (it == mvcc_versions_.end()) {
@@ -293,7 +301,7 @@ std::vector<std::pair<Rid, RmRecord>> TransactionManager::CollectVisibleVersionR
         return records;
     }
 
-    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    std::shared_lock<std::shared_mutex> lock(mvcc_latch_);
     auto table_it = mvcc_index_compensation_keys_.find(tab_name);
     if (table_it == mvcc_index_compensation_keys_.end()) {
         return records;
@@ -325,7 +333,7 @@ timestamp_t TransactionManager::GetWatermark() {
 }
 
 void TransactionManager::GarbageCollection() {
-    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
     timestamp_t watermark = running_txns_.GetWatermark();
     std::vector<std::string> removable_entries;
     for (auto &entry_pair : mvcc_versions_) {
@@ -375,6 +383,7 @@ void TransactionManager::GarbageCollection() {
             }
         }
         mvcc_versions_.erase(it);
+        mvcc_version_count_.fetch_sub(1, std::memory_order_release);
     }
     CleanupSerializableStateLocked();
 }
@@ -382,7 +391,7 @@ void TransactionManager::GarbageCollection() {
 void TransactionManager::CheckMvccWriteConflict(const std::string &tab_name, const Rid &rid,
                                                 const RmRecord &old_rec, Transaction *txn) {
     if (!IsMvccTxn(txn)) return;
-    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
     std::string key = MvccKey(tab_name, rid);
     auto it = mvcc_versions_.find(key);
     if (it == mvcc_versions_.end()) {
@@ -530,7 +539,7 @@ void TransactionManager::MvccInsertLocked(const std::string &tab_name, const Rid
 void TransactionManager::MvccInsert(const std::string &tab_name, const Rid &rid,
                                     const RmRecord &new_rec, Transaction *txn) {
     if (!ShouldVersionWrites(txn)) return;
-    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
     MvccInsertLocked(tab_name, rid, new_rec, txn);
 }
 
@@ -578,14 +587,36 @@ bool TransactionManager::RecordsConflictByLogicalKey(const TabMeta &tab, const R
 void TransactionManager::CheckMvccUniqueConflict(const std::string &tab_name, const RmRecord &new_rec,
                                                  Transaction *txn, const Rid *self_rid) {
     if (!IsMvccTxn(txn)) return;
-    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
     const TabMeta &tab = sm_manager_->db_.get_table(tab_name);
-    for (auto &entry_pair : mvcc_versions_) {
-        auto &entry = entry_pair.second;
+    auto table_it = mvcc_table_keys_.find(tab_name);
+    if (table_it == mvcc_table_keys_.end()) {
+        return;
+    }
+    bool include_fallback = self_rid == nullptr;
+    auto new_keys = BuildMvccConflictKeys(tab, new_rec, include_fallback);
+    auto conflicts_with_new = [&](const RmRecord &record) {
+        auto record_keys = BuildMvccConflictKeys(tab, record, include_fallback);
+        for (auto &new_key : new_keys) {
+            for (auto &record_key : record_keys) {
+                if (new_key == record_key) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    for (auto &key : table_it->second) {
+        auto entry_it = mvcc_versions_.find(key);
+        if (entry_it == mvcc_versions_.end()) {
+            continue;
+        }
+        auto &entry = entry_it->second;
         if (self_rid != nullptr && entry.rid.page_no == self_rid->page_no && entry.rid.slot_no == self_rid->slot_no) {
             continue;
         }
-        if (entry.tab_name != tab_name || !entry.has_head_record || entry.last_writer_txn == txn->get_transaction_id()) {
+        if (!entry.has_head_record || entry.last_writer_txn == txn->get_transaction_id()) {
             continue;
         }
         bool conflicts_with_snapshot = entry.writer_txn != INVALID_TXN_ID || entry.commit_ts > txn->get_start_ts();
@@ -599,16 +630,14 @@ void TransactionManager::CheckMvccUniqueConflict(const std::string &tab_name, co
         if (!has_live_version) {
             continue;
         }
-        bool include_fallback = self_rid == nullptr;
-        if (entry.exists && !entry.is_deleted &&
-            RecordsConflictByLogicalKey(tab, new_rec, entry.head_record, include_fallback)) {
+        if (entry.exists && !entry.is_deleted && conflicts_with_new(entry.head_record)) {
             throw TransactionAbortException(txn->get_transaction_id(), AbortReason::MVCC_CONFLICT);
         }
         for (auto &version : entry.undo_versions) {
             if (version.is_deleted) {
                 continue;
             }
-            if (RecordsConflictByLogicalKey(tab, new_rec, version.record, include_fallback)) {
+            if (conflicts_with_new(version.record)) {
                 throw TransactionAbortException(txn->get_transaction_id(), AbortReason::MVCC_CONFLICT);
             }
         }
@@ -626,7 +655,7 @@ Rid TransactionManager::MvccInsertWithPhysical(const std::string &tab_name, cons
     if (!ShouldVersionWrites(txn)) {
         return insert_fn();
     }
-    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
     Rid rid = insert_fn();
     try {
         MvccInsertLocked(tab_name, rid, new_rec, txn);
@@ -640,7 +669,7 @@ Rid TransactionManager::MvccInsertWithPhysical(const std::string &tab_name, cons
 void TransactionManager::MvccUpdate(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
                                     const RmRecord &new_rec, Transaction *txn) {
     if (!ShouldVersionWrites(txn)) return;
-    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
     CheckSerializableWriteLocked(tab_name, rid, &old_rec, &new_rec, txn);
     PrepareWriteLocked(tab_name, rid, old_rec, txn, false);
     auto &entry = mvcc_versions_[MvccKey(tab_name, rid)];
@@ -660,7 +689,7 @@ void TransactionManager::MvccUpdate(const std::string &tab_name, const Rid &rid,
 void TransactionManager::MvccDelete(const std::string &tab_name, const Rid &rid,
                                     const RmRecord &old_rec, Transaction *txn) {
     if (!ShouldVersionWrites(txn)) return;
-    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
     CheckSerializableWriteLocked(tab_name, rid, &old_rec, nullptr, txn);
     PrepareWriteLocked(tab_name, rid, old_rec, txn, false);
     auto &entry = mvcc_versions_[MvccKey(tab_name, rid)];
@@ -680,7 +709,7 @@ void TransactionManager::RegisterSerializableRead(const std::string &tab_name, c
     if (!IsMvccTxn(txn) || txn->get_isolation_level() != IsolationLevel::SERIALIZABLE) {
         return;
     }
-    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
     RememberSerializableTxnLocked(txn);
     PredicateRead read;
     read.txn_id = txn->get_transaction_id();
@@ -793,7 +822,7 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     if (txn->is_mvcc() || !txn->mvcc_write_keys().empty()) {
         timestamp_t commit_ts;
         {
-            std::scoped_lock<std::mutex> lock(mvcc_latch_);
+            std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
             commit_ts = last_commit_ts_.load() + 1;
             txn->set_commit_ts(commit_ts);
             for (auto &key : txn->mvcc_write_keys()) {
@@ -821,7 +850,7 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
             active_mvcc_txn_count_.fetch_sub(1);
         }
         {
-            std::scoped_lock<std::mutex> lock(mvcc_latch_);
+            std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
             CleanupSerializableStateLocked();
         }
         if ((gc_commit_counter_.fetch_add(1) & 1023U) == 1023U) {
@@ -890,7 +919,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
                 continue;
             }
 
-            std::scoped_lock<std::mutex> lock(mvcc_latch_);
+            std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
             auto it = mvcc_versions_.find(key);
             if (it == mvcc_versions_.end() || it->second.writer_txn != txn->get_transaction_id()) {
                 delete write_record;
@@ -934,12 +963,13 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
                     }
                 }
                 mvcc_versions_.erase(it);
+                mvcc_version_count_.fetch_sub(1, std::memory_order_release);
             }
             delete write_record;
         }
 
         {
-            std::scoped_lock<std::mutex> lock(mvcc_latch_);
+            std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
             ClearTxnStateLocked(txn);
         }
 	        // 仅 SI/SER 事务在 begin 登记过活跃计数与水位，RC 写者未登记不可回收。
@@ -948,7 +978,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
 	            active_mvcc_txn_count_.fetch_sub(1);
 	        }
 	        {
-	            std::scoped_lock<std::mutex> lock(mvcc_latch_);
+	            std::scoped_lock<std::shared_mutex> lock(mvcc_latch_);
 	            CleanupSerializableStateLocked();
 	        }
 
