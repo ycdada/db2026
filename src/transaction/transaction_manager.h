@@ -221,7 +221,7 @@ private:
         std::set<std::string> record_keys;
     };
 
-    mutable std::shared_mutex mvcc_latch_;
+    std::mutex mvcc_latch_;
 	    std::unordered_map<std::string, MvccEntry> mvcc_versions_;
 	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_table_keys_;
 	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_index_compensation_keys_;

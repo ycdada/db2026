@@ -26,23 +26,6 @@ class UpdateExecutor : public AbstractExecutor {
     std::vector<SetClause> set_clauses_;
     SmManager *sm_manager_;
 
-    struct IndexUpdateEntry {
-        IxIndexHandle *ih;
-        std::vector<char> old_key;
-        std::vector<char> new_key;
-        bool changed;
-    };
-
-    std::vector<char> make_index_key(const RmRecord &rec, const IndexMeta &index) const {
-        std::vector<char> key(index.col_tot_len);
-        int offset = 0;
-        for (int j = 0; j < index.col_num; ++j) {
-            memcpy(key.data() + offset, rec.data + index.cols[j].offset, index.cols[j].len);
-            offset += index.cols[j].len;
-        }
-        return key;
-    }
-
     [[noreturn]] void abort_mvcc_statement() {
         auto txn = context_ != nullptr ? context_->txn_ : nullptr;
         txn_id_t txn_id = txn != nullptr ? txn->get_transaction_id() : INVALID_TXN_ID;
@@ -138,25 +121,22 @@ class UpdateExecutor : public AbstractExecutor {
 	                context_->txn_mgr_->CheckMvccUniqueConflict(tab_name_, *new_rec, context_->txn_, &rid);
 	            }
 
-            std::vector<IndexUpdateEntry> index_entries;
-            index_entries.reserve(tab_.indexes.size());
-            for (auto &index : tab_.indexes) {
-                auto ih = sm_manager_->ihs_.at(
+	            for (auto &index : tab_.indexes) {
+	                auto ih = sm_manager_->ihs_.at(
                     sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                auto old_key = make_index_key(*old_rec, index);
-                auto new_key = make_index_key(*new_rec, index);
-                bool changed = old_key != new_key;
-                if (changed) {
-                    std::vector<Rid> result;
-                    if (ih->get_value(new_key.data(), &result, context_->txn_)) {
-                        bool self = result.size() == 1 && result[0].page_no == rid.page_no &&
-                                    result[0].slot_no == rid.slot_no;
-                        if (!self) {
-                            throw RMDBError("Duplicate key in unique index");
-                        }
+                std::vector<char> new_key(index.col_tot_len);
+                int offset = 0;
+                for (int j = 0; j < index.col_num; ++j) {
+                    memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
+                    offset += index.cols[j].len;
+                }
+                std::vector<Rid> result;
+                if (ih->get_value(new_key.data(), &result, context_->txn_)) {
+                    bool self = result.size() == 1 && result[0].page_no == rid.page_no && result[0].slot_no == rid.slot_no;
+                    if (!self) {
+                        throw RMDBError("Duplicate key in unique index");
                     }
                 }
-                index_entries.push_back({ih, std::move(old_key), std::move(new_key), changed});
             }
 
 	            if (version_writes) {
@@ -173,38 +153,52 @@ class UpdateExecutor : public AbstractExecutor {
                 context_->txn_->set_prev_lsn(lsn);
             }
 
-            std::vector<IndexUpdateEntry *> deleted_old_index_entries;
-            std::vector<IndexUpdateEntry *> inserted_new_index_entries;
+            std::vector<std::pair<IxIndexHandle *, std::vector<char>>> deleted_old_index_entries;
+            std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_new_index_entries;
             try {
-                for (auto &entry : index_entries) {
-                    if (!entry.changed) {
-                        continue;
+                // 更新前，删除旧索引项
+                for (size_t i = 0; i < tab_.indexes.size(); ++i) {
+                    auto &index = tab_.indexes[i];
+                    auto ih = sm_manager_->ihs_.at(
+                        sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                    std::vector<char> old_key(index.col_tot_len);
+                    int offset = 0;
+                    for (int j = 0; j < index.col_num; ++j) {
+                        memcpy(old_key.data() + offset, old_rec->data + index.cols[j].offset, index.cols[j].len);
+                        offset += index.cols[j].len;
                     }
-                    entry.ih->delete_entry(entry.old_key.data(), context_->txn_);
-                    deleted_old_index_entries.push_back(&entry);
+                    ih->delete_entry(old_key.data(), context_->txn_);
+                    deleted_old_index_entries.emplace_back(ih, std::move(old_key));
                 }
 
                 // 将更新后的记录写回
                 fh_->update_record(rid, new_rec->data, context_);
 
-                for (auto &entry : index_entries) {
-                    if (!entry.changed) {
-                        continue;
+                // 插入新的索引项
+                for (size_t i = 0; i < tab_.indexes.size(); ++i) {
+                    auto &index = tab_.indexes[i];
+                    auto ih = sm_manager_->ihs_.at(
+                        sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                    std::vector<char> new_key(index.col_tot_len);
+                    int offset = 0;
+                    for (int j = 0; j < index.col_num; ++j) {
+                        memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
+                        offset += index.cols[j].len;
                     }
-                    if (entry.ih->insert_entry(entry.new_key.data(), rid, context_->txn_) == IX_NO_PAGE) {
+                    if (ih->insert_entry(new_key.data(), rid, context_->txn_) == IX_NO_PAGE) {
                         throw RMDBError("Duplicate key in unique index");
                     }
-                    inserted_new_index_entries.push_back(&entry);
+                    inserted_new_index_entries.emplace_back(ih, std::move(new_key));
                 }
             } catch (TransactionAbortException &) {
                 throw;
             } catch (...) {
                 for (auto &entry : inserted_new_index_entries) {
-                    entry->ih->delete_entry(entry->new_key.data(), context_->txn_);
+                    entry.first->delete_entry(entry.second.data(), context_->txn_);
                 }
                 fh_->update_record(rid, old_rec->data, context_);
                 for (auto &entry : deleted_old_index_entries) {
-                    entry->ih->insert_entry(entry->old_key.data(), rid, context_->txn_);
+                    entry.first->insert_entry(entry.second.data(), rid, context_->txn_);
                 }
                 if (mvcc) {
                     abort_mvcc_statement();
