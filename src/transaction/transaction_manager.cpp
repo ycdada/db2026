@@ -580,12 +580,20 @@ void TransactionManager::CheckMvccUniqueConflict(const std::string &tab_name, co
     if (!IsMvccTxn(txn)) return;
     std::scoped_lock<std::mutex> lock(mvcc_latch_);
     const TabMeta &tab = sm_manager_->db_.get_table(tab_name);
-    for (auto &entry_pair : mvcc_versions_) {
-        auto &entry = entry_pair.second;
+    auto table_it = mvcc_table_keys_.find(tab_name);
+    if (table_it == mvcc_table_keys_.end()) {
+        return;
+    }
+    for (auto &version_key : table_it->second) {
+        auto entry_it = mvcc_versions_.find(version_key);
+        if (entry_it == mvcc_versions_.end()) {
+            continue;
+        }
+        auto &entry = entry_it->second;
         if (self_rid != nullptr && entry.rid.page_no == self_rid->page_no && entry.rid.slot_no == self_rid->slot_no) {
             continue;
         }
-        if (entry.tab_name != tab_name || !entry.has_head_record || entry.last_writer_txn == txn->get_transaction_id()) {
+        if (!entry.has_head_record || entry.last_writer_txn == txn->get_transaction_id()) {
             continue;
         }
         bool conflicts_with_snapshot = entry.writer_txn != INVALID_TXN_ID || entry.commit_ts > txn->get_start_ts();

@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #include "planner.h"
 
 #include <memory>
+#include <unordered_map>
 
 #include "execution/executor_delete.h"
 #include "execution/executor_index_scan.h"
@@ -26,15 +27,23 @@ See the Mulan PSL v2 for more details. */
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string>& index_col_names) {
     index_col_names.clear();
     TabMeta& tab = sm_manager_->db_.get_table(tab_name);
+    std::unordered_map<std::string, std::vector<const Condition *>> cond_by_col;
+    cond_by_col.reserve(curr_conds.size());
+    for (auto &cond : curr_conds) {
+        if (cond.is_rhs_val && cond.lhs_col.tab_name == tab_name) {
+            cond_by_col[cond.lhs_col.col_name].push_back(&cond);
+        }
+    }
     size_t best_match = 0;
     std::vector<std::string> best_cols;
     for (auto &index : tab.indexes) {
         size_t matched = 0;
         for (auto &col : index.cols) {
+            auto cond_it = cond_by_col.find(col.name);
+            if (cond_it == cond_by_col.end()) break;
             bool found = false;
-            for (auto &cond : curr_conds) {
-                if (cond.is_rhs_val && cond.lhs_col.tab_name == tab_name && cond.lhs_col.col_name == col.name &&
-                    cond.op != OP_NE) {
+            for (auto *cond : cond_it->second) {
+                if (cond->op != OP_NE) {
                     found = true;
                     break;
                 }
@@ -42,9 +51,8 @@ bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_c
             if (!found) break;
             matched++;
             bool has_range = false;
-            for (auto &cond : curr_conds) {
-                if (cond.is_rhs_val && cond.lhs_col.tab_name == tab_name && cond.lhs_col.col_name == col.name &&
-                    cond.op != OP_EQ && cond.op != OP_NE) {
+            for (auto *cond : cond_it->second) {
+                if (cond->op != OP_EQ && cond->op != OP_NE) {
                     has_range = true;
                     break;
                 }
@@ -323,11 +331,7 @@ std::shared_ptr<Plan> Planner::build_source_scan_plan(const QuerySource *source,
 
     std::vector<std::string> index_col_names;
     PlanTag tag = T_SeqScan;
-    bool mvcc = context != nullptr && context->txn_mgr_ != nullptr &&
-                context->txn_mgr_->IsMvccTxn(context->txn_);
-    if (mvcc) {
-        index_col_names.clear();
-    } else if (is_join_inner) {
+    if (is_join_inner) {
         index_col_names = {inner_col};
         tag = T_IndexScan;
     } else if (get_index_cols(table, conds, index_col_names)) {
@@ -521,9 +525,7 @@ std::shared_ptr<Plan> Planner::generate_explain_plan(std::shared_ptr<Query> quer
 
         TabCol outer_col;
         std::string inner_col;
-	        bool mvcc = context != nullptr && context->txn_mgr_ != nullptr &&
-	                    context->txn_mgr_->IsMvccTxn(context->txn_);
-	        bool use_inlj = !mvcc && source != nullptr && !source->is_derived &&
+	        bool use_inlj = source != nullptr && !source->is_derived &&
 	                        choose_inlj_key(sm_manager_, tab, joined, join_conds, outer_col, inner_col);
 
         std::shared_ptr<Plan> leaf;
@@ -626,9 +628,7 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         // 只有一张表，不需要进行物理优化了
         // int index_no = get_indexNo(x->tab_name, query->conds);
         std::vector<std::string> index_col_names;
-        bool mvcc = context != nullptr && context->txn_mgr_ != nullptr &&
-                    context->txn_mgr_->IsMvccTxn(context->txn_);
-        bool index_exist = !mvcc && get_index_cols(x->tab_name, query->conds, index_col_names);
+        bool index_exist = get_index_cols(x->tab_name, query->conds, index_col_names);
         
         if (index_exist == false) {  // 该表没有索引
             index_col_names.clear();
@@ -648,9 +648,7 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         // 只有一张表，不需要进行物理优化了
         // int index_no = get_indexNo(x->tab_name, query->conds);
         std::vector<std::string> index_col_names;
-        bool mvcc = context != nullptr && context->txn_mgr_ != nullptr &&
-                    context->txn_mgr_->IsMvccTxn(context->txn_);
-        bool index_exist = !mvcc && get_index_cols(x->tab_name, query->conds, index_col_names);
+        bool index_exist = get_index_cols(x->tab_name, query->conds, index_col_names);
 
         if (index_exist == false) {  // 该表没有索引
         index_col_names.clear();

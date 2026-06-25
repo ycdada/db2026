@@ -121,30 +121,13 @@ class UpdateExecutor : public AbstractExecutor {
 	                context_->txn_mgr_->CheckMvccUniqueConflict(tab_name_, *new_rec, context_->txn_, &rid);
 	            }
 
-	            for (auto &index : tab_.indexes) {
-	                auto ih = sm_manager_->ihs_.at(
-                    sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                std::vector<char> new_key(index.col_tot_len);
-                int offset = 0;
-                for (int j = 0; j < index.col_num; ++j) {
-                    memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
-                    offset += index.cols[j].len;
+            bool write_record_appended = false;
+            if (version_writes) {
+                context_->txn_mgr_->MvccUpdate(tab_name_, rid, *old_rec, *new_rec, context_->txn_);
+                if (context_->txn_ != nullptr) {
+                    context_->txn_->append_write_record(new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *old_rec));
+                    write_record_appended = true;
                 }
-                std::vector<Rid> result;
-                if (ih->get_value(new_key.data(), &result, context_->txn_)) {
-                    bool self = result.size() == 1 && result[0].page_no == rid.page_no && result[0].slot_no == rid.slot_no;
-                    if (!self) {
-                        throw RMDBError("Duplicate key in unique index");
-                    }
-                }
-            }
-
-	            if (version_writes) {
-	                context_->txn_mgr_->MvccUpdate(tab_name_, rid, *old_rec, *new_rec, context_->txn_);
-	            }
-
-            if (context_->txn_ != nullptr) {
-                context_->txn_->append_write_record(new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *old_rec));
             }
             if (context_ != nullptr && context_->txn_ != nullptr && context_->log_mgr_ != nullptr) {
                 UpdateLogRecord log(context_->txn_->get_transaction_id(), context_->txn_->get_prev_lsn(),
@@ -204,6 +187,9 @@ class UpdateExecutor : public AbstractExecutor {
                     abort_mvcc_statement();
                 }
                 throw;
+            }
+            if (!write_record_appended && context_->txn_ != nullptr) {
+                context_->txn_->append_write_record(new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *old_rec));
             }
         }
         return nullptr;

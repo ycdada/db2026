@@ -265,20 +265,6 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
             }
         }
 
-        for (auto &index : tab.indexes) {
-            auto ih = ihs_.at(ix_manager_->get_index_name(tab_name, index.cols)).get();
-            std::vector<char> key(index.col_tot_len);
-            int offset = 0;
-            for (int i = 0; i < index.col_num; ++i) {
-                memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
-                offset += index.cols[i].len;
-            }
-            std::vector<Rid> result;
-            if (ih->get_value(key.data(), &result, context ? context->txn_ : nullptr)) {
-                throw RMDBError("Duplicate key in unique index");
-            }
-        }
-
         Rid rid = fh->insert_record(rec.data, context);
         std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_index_entries;
         try {
@@ -518,10 +504,6 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
             for (auto &col : index_cols) {
                 memcpy(key.data() + offset, rec->data + col.offset, col.len);
                 offset += col.len;
-            }
-            std::vector<Rid> result;
-            if (ih->get_value(key.data(), &result, context ? context->txn_ : nullptr)) {
-                throw RMDBError("Duplicate key in unique index");
             }
             if (ih->insert_entry(key.data(), scan.rid(), context ? context->txn_ : nullptr) == IX_NO_PAGE) {
                 throw RMDBError("Duplicate key in unique index");

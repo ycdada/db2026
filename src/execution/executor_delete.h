@@ -75,11 +75,13 @@ class DeleteExecutor : public AbstractExecutor {
             if (mvcc) {
                 context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *rec, context_->txn_);
             }
+            bool write_record_appended = false;
             if (version_writes) {
                 context_->txn_mgr_->MvccDelete(tab_name_, rid, *rec, context_->txn_);
-            }
-            if (context_->txn_ != nullptr) {
-                context_->txn_->append_write_record(new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec));
+                if (context_->txn_ != nullptr) {
+                    context_->txn_->append_write_record(new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec));
+                    write_record_appended = true;
+                }
             }
             if (context_ != nullptr && context_->txn_ != nullptr && context_->log_mgr_ != nullptr) {
                 DeleteLogRecord log(context_->txn_->get_transaction_id(), context_->txn_->get_prev_lsn(),
@@ -87,6 +89,7 @@ class DeleteExecutor : public AbstractExecutor {
                 lsn_t lsn = context_->log_mgr_->add_log_record(&log);
                 context_->txn_->set_prev_lsn(lsn);
             }
+            std::vector<std::pair<IxIndexHandle *, std::vector<char>>> deleted_index_entries;
             try {
                 // 删除索引项
                 for (size_t i = 0; i < tab_.indexes.size(); ++i) {
@@ -99,15 +102,23 @@ class DeleteExecutor : public AbstractExecutor {
                         memcpy(key.data() + offset, rec->data + index.cols[j].offset, index.cols[j].len);
                         offset += index.cols[j].len;
                     }
-                    ih->delete_entry(key.data(), context_->txn_);
+                    if (ih->delete_entry(key.data(), context_->txn_)) {
+                        deleted_index_entries.emplace_back(ih, std::move(key));
+                    }
                 }
                 // MVCC 删除保留物理槽位，旧快照仍可通过版本目录读到旧值。
                 if (!version_writes) {
                     fh_->delete_record(rid, context_);
                 }
+                if (!write_record_appended && context_->txn_ != nullptr) {
+                    context_->txn_->append_write_record(new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec));
+                }
             } catch (TransactionAbortException &) {
                 throw;
             } catch (...) {
+                for (auto &entry : deleted_index_entries) {
+                    entry.first->insert_entry(entry.second.data(), rid, context_->txn_);
+                }
                 if (mvcc) {
                     abort_mvcc_statement();
                 }

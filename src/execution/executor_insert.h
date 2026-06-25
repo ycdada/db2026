@@ -69,19 +69,6 @@ class InsertExecutor : public AbstractExecutor {
         if (mvcc) {
             context_->txn_mgr_->CheckMvccInsertConflict(tab_name_, rec, context_->txn_);
         }
-        for (auto &index : tab_.indexes) {
-            auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-            std::vector<char> key(index.col_tot_len);
-            int offset = 0;
-            for (int i = 0; i < index.col_num; ++i) {
-                memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
-                offset += index.cols[i].len;
-            }
-            std::vector<Rid> result;
-            if (ih->get_value(key.data(), &result, context_->txn_)) {
-                throw RMDBError("Duplicate key in unique index");
-            }
-        }
         // Insert into record file
         if (version_writes) {
             rid_ = context_->txn_mgr_->MvccInsertWithPhysical(

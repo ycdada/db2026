@@ -202,7 +202,6 @@ class IndexScanExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
-        register_ser_read_once();
         fed_conds_ = conds_;
         if (is_join_inner_) {
             if (!join_key_bound_) {
