@@ -193,10 +193,6 @@ bool TransactionManager::HasActiveMvccTransactions() const {
     return active_mvcc_txn_count_.load() > 0;
 }
 
-bool TransactionManager::HasMvccVersions() const {
-    return mvcc_version_count_.load(std::memory_order_acquire) > 0;
-}
-
 std::string TransactionManager::MvccKey(const std::string &tab_name, const Rid &rid) const {
     return tab_name + "#" + std::to_string(rid.page_no) + "#" + std::to_string(rid.slot_no);
 }
@@ -208,7 +204,6 @@ TransactionManager::MvccEntry &TransactionManager::EnsureMvccEntryLocked(
     auto &entry = it->second;
     if (inserted) {
         mvcc_table_keys_[tab_name].insert(key);
-        mvcc_version_count_.fetch_add(1, std::memory_order_release);
     }
     if (inserted && physical != nullptr) {
         entry.exists = true;
@@ -272,9 +267,6 @@ std::optional<RmRecord> TransactionManager::VisibleRecordLocked(
 
 std::unique_ptr<RmRecord> TransactionManager::GetVisibleRecord(const std::string &tab_name, const Rid &rid,
                                                                const RmRecord &physical, Transaction *txn) {
-    if (!HasMvccVersions()) {
-        return std::make_unique<RmRecord>(physical);
-    }
     std::shared_lock<std::shared_mutex> lock(mvcc_latch_);
     std::string key = MvccKey(tab_name, rid);
     auto it = mvcc_versions_.find(key);
@@ -383,7 +375,6 @@ void TransactionManager::GarbageCollection() {
             }
         }
         mvcc_versions_.erase(it);
-        mvcc_version_count_.fetch_sub(1, std::memory_order_release);
     }
     CleanupSerializableStateLocked();
 }
@@ -963,7 +954,6 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
                     }
                 }
                 mvcc_versions_.erase(it);
-                mvcc_version_count_.fetch_sub(1, std::memory_order_release);
             }
             delete write_record;
         }
