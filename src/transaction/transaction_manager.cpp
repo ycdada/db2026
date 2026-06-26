@@ -19,6 +19,8 @@ std::unordered_map<txn_id_t, Transaction *> TransactionManager::txn_map = {};
 
 namespace {
 
+constexpr size_t TXN_POOL_GRACE_SIZE = 64;
+
 std::vector<char> make_index_key(const RmRecord &record, const IndexMeta &index) {
     std::vector<char> key(index.col_tot_len);
     int offset = 0;
@@ -143,10 +145,12 @@ bool eval_txn_conds(const char *rec_data, const std::vector<ColMeta> &cols,
 }
 
 TransactionManager::~TransactionManager() {
-    for (auto *txn : free_txns_) {
-        delete txn;
+    for (auto &entry : reusable_txns_) {
+        for (auto *txn : entry.second) {
+            delete txn;
+        }
     }
-    free_txns_.clear();
+    reusable_txns_.clear();
     for (auto &entry : txn_map) {
         delete entry.second;
     }
@@ -171,10 +175,11 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
         // 创建新事务
         txn_id_t new_txn_id = next_txn_id_++;
         std::unique_lock<std::mutex> lock(latch_);
-        if (!free_txns_.empty()) {
-            txn = free_txns_.back();
-            free_txns_.pop_back();
-            txn->Reset(new_txn_id, isolation_level);
+        auto &thread_pool = reusable_txns_[std::this_thread::get_id()];
+        if (thread_pool.size() > TXN_POOL_GRACE_SIZE) {
+            txn = thread_pool.front();
+            thread_pool.pop_front();
+            txn->ResetForReuse(new_txn_id, isolation_level);
         } else {
             txn = new Transaction(new_txn_id, isolation_level);
         }
@@ -203,6 +208,16 @@ void TransactionManager::release_transaction(Transaction *txn) {
     if (state != TransactionState::COMMITTED && state != TransactionState::ABORTED) {
         return;
     }
+    if (txn->is_mvcc() || !txn->mvcc_write_keys().empty()) {
+        return;
+    }
+    if (txn->get_txn_mode()) {
+        return;
+    }
+    if (!txn->get_write_set()->empty() || !txn->get_lock_set()->empty() ||
+        !txn->get_index_latch_page_set()->empty() || !txn->get_index_deleted_page_set()->empty()) {
+        return;
+    }
 
     std::unique_lock<std::mutex> lock(latch_);
     auto it = txn_map.find(txn->get_transaction_id());
@@ -210,7 +225,7 @@ void TransactionManager::release_transaction(Transaction *txn) {
         return;
     }
     txn_map.erase(it);
-    free_txns_.push_back(txn);
+    reusable_txns_[std::this_thread::get_id()].push_back(txn);
 }
 
 bool TransactionManager::IsMvccTxn(Transaction *txn) const {

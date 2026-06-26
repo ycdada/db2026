@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #pragma once
 
 #include <atomic>
+#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 #include <optional>
@@ -180,7 +181,7 @@ private:
     std::mutex latch_;  // 用于txn_map的并发
     SmManager *sm_manager_;
     LockManager *lock_manager_;
-    std::vector<Transaction *> free_txns_;
+    std::unordered_map<std::thread::id, std::deque<Transaction *>> reusable_txns_;
 
     std::atomic<timestamp_t> last_commit_ts_{0};    // 最后提交的时间戳,仅用于MVCC
     std::atomic<int> active_mvcc_txn_count_{0};

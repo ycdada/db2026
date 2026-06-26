@@ -72,7 +72,7 @@ class Transaction {
 
     ~Transaction() { ClearWriteSet(); }
 
-    void Reset(txn_id_t txn_id, IsolationLevel isolation_level = IsolationLevel::READ_COMMITTED) {
+    void ResetForReuse(txn_id_t txn_id, IsolationLevel isolation_level = IsolationLevel::READ_COMMITTED) {
         txn_mode_ = false;
         state_ = TransactionState::DEFAULT;
         isolation_level_ = isolation_level;
@@ -180,7 +180,7 @@ class Transaction {
   std::vector<UndoLog> undo_logs_;
   /** 用于访问事务级撤销日志的锁。 */
   std::mutex latch_;
-    std::set<std::string> mvcc_write_keys_;
+  std::set<std::string> mvcc_write_keys_;
 
     void ClearWriteSet() {
         if (write_set_ == nullptr) {
