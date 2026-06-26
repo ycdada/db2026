@@ -255,58 +255,51 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
 // 执行select语句，select语句的输出除了需要返回客户端外，还需要写入output.txt文件中
 void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, std::vector<TabCol> sel_cols,
                             Context *context) {
-    constexpr size_t EXECUTOR_BATCH_SIZE = 256;
     std::vector<std::string> captions;
     captions.reserve(sel_cols.size());
     for (auto &sel_col : sel_cols) {
         captions.push_back(sel_col.col_name);
     }
 
-    bool output_file_enabled = context->output_file_enabled_ == nullptr || *context->output_file_enabled_;
     std::vector<std::vector<std::string>> rows;
-    size_t row_count = 0;
+    for (executorTreeRoot->beginTuple(); !executorTreeRoot->is_end(); executorTreeRoot->nextTuple()) {
+        auto Tuple = executorTreeRoot->Next();
+        std::vector<std::string> columns;
+        for (auto &col : executorTreeRoot->cols()) {
+            std::string col_str;
+            char *rec_buf = Tuple->data + col.offset;
+            if (col.type == TYPE_INT) {
+                col_str = std::to_string(*(int *)rec_buf);
+            } else if (col.type == TYPE_FLOAT) {
+                std::ostringstream os;
+                os << std::fixed << std::setprecision(6) << *(float *)rec_buf;
+                col_str = os.str();
+            } else if (col.type == TYPE_STRING) {
+                col_str = std::string((char *)rec_buf, col.len);
+                col_str.resize(strlen(col_str.c_str()));
+            }
+            columns.push_back(col_str);
+        }
+        rows.push_back(std::move(columns));
+    }
+    executorTreeRoot->finish();
 
+    // Print header into buffer
     RecordPrinter rec_printer(sel_cols.size());
     rec_printer.print_separator(context);
     rec_printer.print_record(captions, context);
     rec_printer.print_separator(context);
-
-    std::vector<std::unique_ptr<RmRecord>> batch;
-    batch.reserve(EXECUTOR_BATCH_SIZE);
-    executorTreeRoot->beginTuple();
-    while (executorTreeRoot->NextBatch(batch, EXECUTOR_BATCH_SIZE) > 0) {
-        for (auto &Tuple : batch) {
-            std::vector<std::string> columns;
-            for (auto &col : executorTreeRoot->cols()) {
-                std::string col_str;
-                char *rec_buf = Tuple->data + col.offset;
-                if (col.type == TYPE_INT) {
-                    col_str = std::to_string(*(int *)rec_buf);
-                } else if (col.type == TYPE_FLOAT) {
-                    std::ostringstream os;
-                    os << std::fixed << std::setprecision(6) << *(float *)rec_buf;
-                    col_str = os.str();
-                } else if (col.type == TYPE_STRING) {
-                    col_str = std::string((char *)rec_buf, col.len);
-                    col_str.resize(strlen(col_str.c_str()));
-                }
-                columns.push_back(col_str);
-            }
-            rec_printer.print_record(columns, context);
-            row_count++;
-            if (output_file_enabled) {
-                rows.push_back(std::move(columns));
-            }
-        }
+    // Print records
+    for (auto &columns : rows) {
+        // print record into buffer
+        rec_printer.print_record(columns, context);
     }
-    executorTreeRoot->finish();
-
     // Print footer into buffer
     rec_printer.print_separator(context);
     // Print record count into buffer
-    RecordPrinter::print_record_count(row_count, context);
+    RecordPrinter::print_record_count(rows.size(), context);
 
-    if (output_file_enabled) {
+    if (context->output_file_enabled_ == nullptr || *context->output_file_enabled_) {
         std::fstream outfile;
         outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
         if (context->isolation_output_format_ != nullptr && context->isolation_output_format_->load()) {
@@ -326,11 +319,8 @@ void QlManager::run_dml(std::unique_ptr<AbstractExecutor> exec){
 // 题目四：执行 EXPLAIN ANALYZE 计划树，统计各节点运行时行数后输出计划树（不输出结果集）
 void QlManager::run_explain(std::unique_ptr<AbstractExecutor> executorTreeRoot, Context *context) {
     // 完整执行计划，累计各节点 rows_
-    constexpr size_t EXECUTOR_BATCH_SIZE = 256;
-    std::vector<std::unique_ptr<RmRecord>> batch;
-    batch.reserve(EXECUTOR_BATCH_SIZE);
-    executorTreeRoot->beginTuple();
-    while (executorTreeRoot->NextBatch(batch, EXECUTOR_BATCH_SIZE) > 0) {
+    for (executorTreeRoot->beginTuple(); !executorTreeRoot->is_end(); executorTreeRoot->nextTuple()) {
+        executorTreeRoot->Next();
     }
     executorTreeRoot->finish();
     // 生成计划树文本

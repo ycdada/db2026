@@ -31,7 +31,6 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     // 缓存当前匹配的左、右记录，用于Next()拼接
     std::unique_ptr<RmRecord> left_rec_;
     std::unique_ptr<RmRecord> right_rec_;
-    std::vector<char> eval_buf_;
 
     // 前进到下一个匹配的左右记录对
     void advance_to_next_match() {
@@ -41,9 +40,11 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             while (!right_->is_end()) {
                 auto cur_right = right_->Next();
                 if (cur_right == nullptr) break;
-                memcpy(eval_buf_.data(), left_rec_->data, left_->tupleLen());
-                memcpy(eval_buf_.data() + left_->tupleLen(), cur_right->data, right_->tupleLen());
-                if (eval_conds(eval_buf_.data(), cols_, fed_conds_)) {
+                // 构造拼接记录以评估条件
+                auto joined = std::make_unique<RmRecord>(len_);
+                memcpy(joined->data, left_rec_->data, left_->tupleLen());
+                memcpy(joined->data + left_->tupleLen(), cur_right->data, right_->tupleLen());
+                if (eval_conds(joined->data, cols_, fed_conds_)) {
                     right_rec_ = std::move(cur_right);
                     isend = false;
                     return;
@@ -67,7 +68,6 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         left_ = std::move(left);
         right_ = std::move(right);
         len_ = left_->tupleLen() + right_->tupleLen();
-        eval_buf_.resize(len_);
         cols_ = left_->cols();
         auto right_cols = right_->cols();
         for (auto &col : right_cols) {
@@ -113,19 +113,6 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         memcpy(rec->data + left_->tupleLen(), right_rec_->data, right_->tupleLen());
         rows_++;  // 题目四：统计连接输出行数
         return rec;
-    }
-
-    size_t NextBatch(std::vector<std::unique_ptr<RmRecord>> &batch, size_t max_batch_size) override {
-        batch.clear();
-        while (batch.size() < max_batch_size && !isend) {
-            auto rec = std::make_unique<RmRecord>(len_);
-            memcpy(rec->data, left_rec_->data, left_->tupleLen());
-            memcpy(rec->data + left_->tupleLen(), right_rec_->data, right_->tupleLen());
-            batch.push_back(std::move(rec));
-            rows_++;
-            nextTuple();
-        }
-        return batch.size();
     }
 
     const std::vector<ColMeta> &cols() const override { return cols_; }
