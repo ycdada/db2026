@@ -22,10 +22,12 @@ std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid& rid, Context* cont
     if (mem_it != memory_records_.end()) {
         return std::make_unique<RmRecord>(*mem_it->second);
     }
-    // Todo:
-    // 1. 获取指定记录所在的page handle
     RmPageHandle page_handle = fetch_page_handle(rid.page_no);
-    // 2. 初始化一个指向RmRecord的指针（赋值其内部的data和size）
+    if (rid.slot_no < 0 || rid.slot_no >= file_hdr_.num_records_per_page ||
+        !Bitmap::is_set(page_handle.bitmap, rid.slot_no)) {
+        buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
+        throw RecordNotFoundError(rid.page_no, rid.slot_no);
+    }
     char *slot = page_handle.get_slot(rid.slot_no);
     auto record = std::make_unique<RmRecord>(file_hdr_.record_size, slot);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);

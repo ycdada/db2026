@@ -52,7 +52,12 @@ class UpdateExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> Next() override {
         for (auto &rid : rids_) {
             // 获取当前记录
-            auto physical_old_rec = fh_->get_record(rid, context_);
+            std::unique_ptr<RmRecord> physical_old_rec;
+            try {
+                physical_old_rec = fh_->get_record(rid, context_);
+            } catch (const RecordNotFoundError &) {
+                continue;
+            }
             bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                         context_->txn_mgr_->IsMvccTxn(context_->txn_);
             // RC 写者在有活跃 SI/SER 事务时也要保留旧版本（题目9 示例二）。

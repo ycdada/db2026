@@ -88,7 +88,12 @@ class IndexScanExecutor : public AbstractExecutor {
     bool load_visible_index_current() {
         auto rid = scan_->rid();
         seen_rids_.insert({rid.page_no, rid.slot_no});
-        auto physical = fh_->get_record(rid, context_);
+        std::unique_ptr<RmRecord> physical;
+        try {
+            physical = fh_->get_record(rid, context_);
+        } catch (const RecordNotFoundError &) {
+            return false;
+        }
         std::unique_ptr<RmRecord> rec;
         if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
             rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, rid, *physical, context_->txn_);

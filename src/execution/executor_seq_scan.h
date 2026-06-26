@@ -48,7 +48,12 @@ class SeqScanExecutor : public AbstractExecutor {
     }
 
     bool load_visible_current() {
-        auto physical = fh_->get_record(scan_->rid(), context_);
+        std::unique_ptr<RmRecord> physical;
+        try {
+            physical = fh_->get_record(scan_->rid(), context_);
+        } catch (const RecordNotFoundError &) {
+            return false;
+        }
         std::unique_ptr<RmRecord> visible;
         if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
             visible = context_->txn_mgr_->GetVisibleRecord(tab_name_, scan_->rid(), *physical, context_->txn_);

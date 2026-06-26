@@ -52,7 +52,12 @@ class DeleteExecutor : public AbstractExecutor {
         // 遍历 rids_，删除每条记录及其索引项
         for (auto &rid : rids_) {
             // 获取记录以用于删除索引
-            auto physical = fh_->get_record(rid, context_);
+            std::unique_ptr<RmRecord> physical;
+            try {
+                physical = fh_->get_record(rid, context_);
+            } catch (const RecordNotFoundError &) {
+                continue;
+            }
             bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                         context_->txn_mgr_->IsMvccTxn(context_->txn_);
             // RC 写者在有活跃 SI/SER 事务时也要保留旧版本并保留物理槽位（题目9 示例二）。
