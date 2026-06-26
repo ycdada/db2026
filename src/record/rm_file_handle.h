@@ -13,6 +13,7 @@ See the Mulan PSL v2 for more details. */
 #include <assert.h>
 
 #include <memory>
+#include <shared_mutex>
 
 #include "bitmap.h"
 #include "common/context.h"
@@ -41,7 +42,7 @@ struct RmPageHandle {
 };
 
 /* 每个RmFileHandle对应一个表的数据文件，里面有多个page，每个page的数据封装在RmPageHandle中 */
-class RmFileHandle {      
+class RmFileHandle {
     friend class RmScan;    
     friend class RmManager;
 
@@ -50,6 +51,7 @@ class RmFileHandle {
     BufferPoolManager *buffer_pool_manager_;
     int fd_;        // 打开文件后产生的文件句柄
     RmFileHdr file_hdr_;    // 文件头，维护当前表文件的元数据
+    mutable std::shared_mutex latch_;
 
    public:
     RmFileHandle(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, int fd)
@@ -62,12 +64,19 @@ class RmFileHandle {
         disk_manager_->set_fd2pageno(fd, file_hdr_.num_pages);
     }
 
-    RmFileHdr get_file_hdr() { return file_hdr_; }
+    RmFileHdr get_file_hdr() {
+        std::shared_lock<std::shared_mutex> guard(latch_);
+        return file_hdr_;
+    }
     int GetFd() { return fd_; }
-    void flush_file_hdr() { disk_manager_->write_page(fd_, RM_FILE_HDR_PAGE, (char *)&file_hdr_, sizeof(file_hdr_)); }
+    void flush_file_hdr() {
+        std::shared_lock<std::shared_mutex> guard(latch_);
+        disk_manager_->write_page(fd_, RM_FILE_HDR_PAGE, (char *)&file_hdr_, sizeof(file_hdr_));
+    }
 
     /* 判断指定位置上是否已经存在一条记录，通过Bitmap来判断 */
     bool is_record(const Rid &rid) const {
+        std::shared_lock<std::shared_mutex> guard(latch_);
         RmPageHandle page_handle = fetch_page_handle(rid.page_no);
         bool exists = Bitmap::is_set(page_handle.bitmap, rid.slot_no);  // page的slot_no位置上是否有record
         buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
@@ -84,11 +93,15 @@ class RmFileHandle {
 
     void update_record(const Rid &rid, char *buf, Context *context);
 
+    void reset_data_pages();
+
     RmPageHandle create_new_page_handle();
 
     RmPageHandle fetch_page_handle(int page_no) const;
 
    private:
+    RmPageHandle create_new_page_handle_unlocked();
+
     RmPageHandle create_page_handle();
 
     void release_page_handle(RmPageHandle &page_handle);

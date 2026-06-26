@@ -29,6 +29,7 @@ RmScan::RmScan(const RmFileHandle *file_handle) : file_handle_(file_handle) {
 void RmScan::next() {
     // Todo:
     // 找到文件中下一个存放了记录的非空闲位置，用rid_来指向这个位置
+    std::shared_lock<std::shared_mutex> guard(file_handle_->latch_);
     while (rid_.page_no < file_handle_->file_hdr_.num_pages) {
         RmPageHandle page_handle = file_handle_->fetch_page_handle(rid_.page_no);
         int slot_no = Bitmap::next_bit(true, page_handle.bitmap,

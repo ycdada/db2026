@@ -17,6 +17,7 @@ See the Mulan PSL v2 for more details. */
  * @return {unique_ptr<RmRecord>} rid对应的记录对象指针
  */
 std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid& rid, Context* context) const {
+    std::shared_lock<std::shared_mutex> guard(latch_);
     // Todo:
     // 1. 获取指定记录所在的page handle
     RmPageHandle page_handle = fetch_page_handle(rid.page_no);
@@ -34,6 +35,7 @@ std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid& rid, Context* cont
  * @return {Rid} 插入的记录的记录号（位置）
  */
 Rid RmFileHandle::insert_record(char* buf, Context* context) {
+    std::unique_lock<std::shared_mutex> guard(latch_);
     // Todo:
     // 1. 获取当前未满的page handle
     RmPageHandle page_handle = create_page_handle();
@@ -62,6 +64,7 @@ Rid RmFileHandle::insert_record(char* buf, Context* context) {
  * @param {char*} buf 要插入记录的数据
  */
 void RmFileHandle::insert_record(const Rid& rid, char* buf) {
+    std::unique_lock<std::shared_mutex> guard(latch_);
     RmPageHandle page_handle = fetch_page_handle(rid.page_no);
     char *slot = page_handle.get_slot(rid.slot_no);
     memcpy(slot, buf, file_hdr_.record_size);
@@ -81,6 +84,7 @@ void RmFileHandle::insert_record(const Rid& rid, char* buf) {
  * @param {Context*} context
  */
 void RmFileHandle::delete_record(const Rid& rid, Context* context) {
+    std::unique_lock<std::shared_mutex> guard(latch_);
     // Todo:
     // 1. 获取指定记录所在的page handle
     RmPageHandle page_handle = fetch_page_handle(rid.page_no);
@@ -103,6 +107,7 @@ void RmFileHandle::delete_record(const Rid& rid, Context* context) {
  * @param {Context*} context
  */
 void RmFileHandle::update_record(const Rid& rid, char* buf, Context* context) {
+    std::unique_lock<std::shared_mutex> guard(latch_);
     // Todo:
     // 1. 获取指定记录所在的page handle
     RmPageHandle page_handle = fetch_page_handle(rid.page_no);
@@ -112,6 +117,16 @@ void RmFileHandle::update_record(const Rid& rid, char* buf, Context* context) {
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
 
+}
+
+void RmFileHandle::reset_data_pages() {
+    std::unique_lock<std::shared_mutex> guard(latch_);
+    for (int page_no = RM_FIRST_RECORD_PAGE; page_no < file_hdr_.num_pages; ++page_no) {
+        buffer_pool_manager_->delete_page(PageId{fd_, page_no});
+    }
+    file_hdr_.num_pages = RM_FIRST_RECORD_PAGE;
+    file_hdr_.first_free_page_no = RM_NO_PAGE;
+    disk_manager_->set_fd2pageno(fd_, file_hdr_.num_pages);
 }
 
 /**
@@ -138,13 +153,22 @@ RmPageHandle RmFileHandle::fetch_page_handle(int page_no) const {
  * @return {RmPageHandle} 新的PageHandle
  */
 RmPageHandle RmFileHandle::create_new_page_handle() {
+    std::unique_lock<std::shared_mutex> guard(latch_);
+    return create_new_page_handle_unlocked();
+}
+
+RmPageHandle RmFileHandle::create_new_page_handle_unlocked() {
     // Todo:
     // 1.使用缓冲池来创建一个新page
     // new_page会在fd对应的文件中分配新的page_no（从file_hdr_.num_pages开始递增），
     // 并将分配结果写回page_id，避免与disk_manager的页号分配重复
-    PageId page_id{fd_, INVALID_PAGE_ID};
-    Page *page = buffer_pool_manager_->new_page(&page_id);
-    page_id_t page_no = page->get_page_id().page_no;
+    PageId page_id{fd_, file_hdr_.num_pages};
+    Page *page = buffer_pool_manager_->new_page_at(page_id);
+    if (page == nullptr) {
+        throw InternalError("BufferPoolManager::new_page_at failed");
+    }
+    page_id_t page_no = page_id.page_no;
+    disk_manager_->set_fd2pageno(fd_, page_no + 1);
     file_hdr_.num_pages++;
     // 2.更新page handle中的相关信息
     RmPageHandle page_handle(&file_hdr_, page);
@@ -169,7 +193,7 @@ RmPageHandle RmFileHandle::create_page_handle() {
     //     1.2 有空闲页：直接获取第一个空闲页
     // 2. 生成page handle并返回给上层
     if (file_hdr_.first_free_page_no == RM_NO_PAGE) {
-        return create_new_page_handle();
+        return create_new_page_handle_unlocked();
     }
     return fetch_page_handle(file_hdr_.first_free_page_no);
 }

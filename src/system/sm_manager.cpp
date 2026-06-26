@@ -205,6 +205,46 @@ static bool is_csv_header(const std::vector<std::string> &fields, const TabMeta 
     return true;
 }
 
+static int compare_record_col(const char *lhs, const char *rhs, const ColMeta &col) {
+    const char *l = lhs + col.offset;
+    const char *r = rhs + col.offset;
+    if (col.type == TYPE_INT) {
+        int lv;
+        int rv;
+        memcpy(&lv, l, sizeof(int));
+        memcpy(&rv, r, sizeof(int));
+        return (lv > rv) - (lv < rv);
+    }
+    if (col.type == TYPE_FLOAT) {
+        float lv;
+        float rv;
+        memcpy(&lv, l, sizeof(float));
+        memcpy(&rv, r, sizeof(float));
+        return (lv > rv) - (lv < rv);
+    }
+    return memcmp(l, r, col.len);
+}
+
+static bool record_less_by_index(const std::unique_ptr<RmRecord> &lhs, const std::unique_ptr<RmRecord> &rhs,
+                                 const IndexMeta &index) {
+    for (auto &col : index.cols) {
+        int cmp = compare_record_col(lhs->data, rhs->data, col);
+        if (cmp != 0) {
+            return cmp < 0;
+        }
+    }
+    return false;
+}
+
+static bool record_key_equal_by_index(const RmRecord &lhs, const RmRecord &rhs, const IndexMeta &index) {
+    for (auto &col : index.cols) {
+        if (compare_record_col(lhs.data, rhs.data, col) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void SmManager::load_table(const std::string& file_name, const std::string& tab_name, Context* context) {
     if (!db_.is_table(tab_name)) {
         throw TableNotFoundError(tab_name);
@@ -226,6 +266,7 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
 
     TabMeta &tab = db_.get_table(tab_name);
     RmFileHandle *fh = fhs_.at(tab_name).get();
+    std::vector<std::unique_ptr<RmRecord>> records;
     std::string line;
     bool first_data_line = true;
     while (std::getline(ifs, line)) {
@@ -245,11 +286,11 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
         }
         first_data_line = false;
 
-        RmRecord rec(fh->get_file_hdr().record_size);
+        auto rec = std::make_unique<RmRecord>(fh->get_file_hdr().record_size);
         for (size_t i = 0; i < fields.size(); ++i) {
             const auto &col = tab.cols[i];
             std::string field = trim_csv_field(fields[i]);
-            char *dst = rec.data + col.offset;
+            char *dst = rec->data + col.offset;
             if (col.type == TYPE_INT) {
                 int value = std::stoi(field);
                 memcpy(dst, &value, sizeof(int));
@@ -264,8 +305,18 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
                 memcpy(dst, field.data(), field.size());
             }
         }
+        records.push_back(std::move(rec));
+    }
 
-        Rid rid = fh->insert_record(rec.data, context);
+    if (!tab.indexes.empty()) {
+        const IndexMeta &clustered_index = tab.indexes.front();
+        std::sort(records.begin(), records.end(), [&](const auto &lhs, const auto &rhs) {
+            return record_less_by_index(lhs, rhs, clustered_index);
+        });
+    }
+
+    for (auto &rec : records) {
+        Rid rid = fh->insert_record(rec->data, context);
         std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_index_entries;
         try {
             for (auto &index : tab.indexes) {
@@ -273,7 +324,7 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
                 std::vector<char> key(index.col_tot_len);
                 int offset = 0;
                 for (int i = 0; i < index.col_num; ++i) {
-                    memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
+                    memcpy(key.data() + offset, rec->data + index.cols[i].offset, index.cols[i].len);
                     offset += index.cols[i].len;
                 }
                 if (ih->insert_entry(key.data(), rid, context ? context->txn_ : nullptr) == IX_NO_PAGE) {
@@ -292,7 +343,7 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
             context->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name, rid));
         }
         if (context != nullptr && context->txn_ != nullptr && context->log_mgr_ != nullptr) {
-            InsertLogRecord log(context->txn_->get_transaction_id(), rec, rid, tab_name);
+            InsertLogRecord log(context->txn_->get_transaction_id(), *rec, rid, tab_name);
             log.prev_lsn_ = context->txn_->get_prev_lsn();
             lsn_t lsn = context->log_mgr_->add_log_record(&log);
             context->txn_->set_prev_lsn(lsn);
@@ -497,16 +548,54 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
 
     try {
         RmFileHandle *fh = fhs_.at(tab_name).get();
-        for (RmScan scan(fh); !scan.is_end(); scan.next()) {
-            auto rec = fh->get_record(scan.rid(), context);
-            std::vector<char> key(col_tot_len);
-            int offset = 0;
-            for (auto &col : index_cols) {
-                memcpy(key.data() + offset, rec->data + col.offset, col.len);
-                offset += col.len;
+        bool make_clustered = tab.indexes.empty();
+        if (make_clustered) {
+            std::vector<std::unique_ptr<RmRecord>> records;
+            for (RmScan scan(fh); !scan.is_end(); scan.next()) {
+                records.push_back(fh->get_record(scan.rid(), context));
             }
-            if (ih->insert_entry(key.data(), scan.rid(), context ? context->txn_ : nullptr) == IX_NO_PAGE) {
-                throw RMDBError("Duplicate key in unique index");
+            IndexMeta temp_index;
+            temp_index.tab_name = tab_name;
+            temp_index.col_tot_len = col_tot_len;
+            temp_index.col_num = static_cast<int>(index_cols.size());
+            temp_index.cols = index_cols;
+            std::sort(records.begin(), records.end(), [&](const auto &lhs, const auto &rhs) {
+                return record_less_by_index(lhs, rhs, temp_index);
+            });
+            for (size_t i = 1; i < records.size(); ++i) {
+                if (record_key_equal_by_index(*records[i - 1], *records[i], temp_index)) {
+                    throw RMDBError("Duplicate key in unique index");
+                }
+            }
+            fh->reset_data_pages();
+            for (auto &rec : records) {
+                Rid rid = fh->insert_record(rec->data, context);
+                std::vector<char> key(col_tot_len);
+                int offset = 0;
+                for (auto &col : index_cols) {
+                    memcpy(key.data() + offset, rec->data + col.offset, col.len);
+                    offset += col.len;
+                }
+                if (ih->insert_entry(key.data(), rid, context ? context->txn_ : nullptr) == IX_NO_PAGE) {
+                    throw RMDBError("Duplicate key in unique index");
+                }
+            }
+            fh->flush_file_hdr();
+            buffer_pool_manager_->flush_all_pages(fh->GetFd());
+            ih->flush_file_hdr();
+            buffer_pool_manager_->flush_all_pages(ih->GetFd());
+        } else {
+            for (RmScan scan(fh); !scan.is_end(); scan.next()) {
+                auto rec = fh->get_record(scan.rid(), context);
+                std::vector<char> key(col_tot_len);
+                int offset = 0;
+                for (auto &col : index_cols) {
+                    memcpy(key.data() + offset, rec->data + col.offset, col.len);
+                    offset += col.len;
+                }
+                if (ih->insert_entry(key.data(), scan.rid(), context ? context->txn_ : nullptr) == IX_NO_PAGE) {
+                    throw RMDBError("Duplicate key in unique index");
+                }
             }
         }
     } catch (...) {

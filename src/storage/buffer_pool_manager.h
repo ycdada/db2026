@@ -14,6 +14,7 @@ See the Mulan PSL v2 for more details. */
 
 #include <cassert>
 #include <list>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -25,36 +26,38 @@ See the Mulan PSL v2 for more details. */
 
 class BufferPoolManager {
    private:
+    struct Shard {
+        std::unordered_map<PageId, frame_id_t, PageIdHash> page_table_;
+        std::list<frame_id_t> free_list_;
+        std::unique_ptr<Replacer> replacer_;
+        std::mutex latch_;
+
+        explicit Shard(size_t pool_size) : replacer_(std::make_unique<LRUReplacer>(pool_size)) {}
+    };
+
     size_t pool_size_;      // buffer_pool中可容纳页面的个数，即帧的个数
+    size_t shard_count_;
     Page *pages_;           // buffer_pool中的Page对象数组，在构造空间中申请内存空间，在析构函数中释放，大小为BUFFER_POOL_SIZE
-    std::unordered_map<PageId, frame_id_t, PageIdHash> page_table_; // 帧号和页面号的映射哈希表，用于根据页面的PageId定位该页面的帧编号
-    std::list<frame_id_t> free_list_;   // 空闲帧编号的链表
+    std::vector<std::unique_ptr<Shard>> shards_;
     DiskManager *disk_manager_;
-    Replacer *replacer_;    // buffer_pool的置换策略，当前赛题中为LRU置换策略
-    std::mutex latch_;      // 用于共享数据结构的并发控制
 
    public:
     BufferPoolManager(size_t pool_size, DiskManager *disk_manager)
-        : pool_size_(pool_size), disk_manager_(disk_manager) {
+        : pool_size_(pool_size), shard_count_(choose_shard_count(pool_size)), disk_manager_(disk_manager) {
         // 为buffer pool分配一块连续的内存空间
         pages_ = new Page[pool_size_];
-        // 可以被Replacer改变
-        if (REPLACER_TYPE.compare("LRU"))
-            replacer_ = new LRUReplacer(pool_size_);
-        else if (REPLACER_TYPE.compare("CLOCK"))
-            replacer_ = new LRUReplacer(pool_size_);
-        else {
-            replacer_ = new LRUReplacer(pool_size_);
+        shards_.reserve(shard_count_);
+        for (size_t i = 0; i < shard_count_; ++i) {
+            shards_.emplace_back(std::make_unique<Shard>(pool_size_));
         }
-        // 初始化时，所有的page都在free_list_中
+        // 初始化时，所有的page都在对应shard的free_list_中
         for (size_t i = 0; i < pool_size_; ++i) {
-            free_list_.emplace_back(static_cast<frame_id_t>(i));  // static_cast转换数据类型
+            shards_[i % shard_count_]->free_list_.emplace_back(static_cast<frame_id_t>(i));
         }
     }
 
     ~BufferPoolManager() {
         delete[] pages_;
-        delete replacer_;
     }
 
     /**
@@ -72,6 +75,8 @@ class BufferPoolManager {
 
     Page* new_page(PageId* page_id);
 
+    Page* new_page_at(PageId page_id);
+
     bool delete_page(PageId page_id);
 
     void flush_all_pages(int fd);
@@ -79,7 +84,13 @@ class BufferPoolManager {
     void delete_all_pages(int fd);
 
    private:
-    bool find_victim_page(frame_id_t* frame_id);
+    static size_t choose_shard_count(size_t pool_size);
 
-    void update_page(Page* page, PageId new_page_id, frame_id_t new_frame_id);
+    size_t shard_index(PageId page_id) const;
+
+    Shard& get_shard(PageId page_id) const;
+
+    bool find_victim_page(Shard& shard, frame_id_t* frame_id);
+
+    void update_page(Shard& shard, Page* page, PageId new_page_id, frame_id_t new_frame_id);
 };

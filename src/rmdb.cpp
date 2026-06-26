@@ -17,6 +17,7 @@ See the Mulan PSL v2 for more details. */
 #include <atomic>
 #include <algorithm>
 #include <cctype>
+#include <memory>
 #include <sstream>
 #include "errors.h"
 #include "optimizer/optimizer.h"
@@ -144,8 +145,6 @@ void *client_handler(void *sock_fd) {
     txn_id_t txn_id = INVALID_TXN_ID;
     IsolationLevel session_isolation_level = IsolationLevel::READ_COMMITTED;
     bool output_file_enabled = true;
-    std::string output = "establish client connection, sockfd: " + std::to_string(fd) + "\n";
-    std::cout << output;
 
     while (true) {
         memset(data_recv, 0, BUFFER_LENGTH);
@@ -170,9 +169,9 @@ void *client_handler(void *sock_fd) {
         offset = 0;
 
         // 开启事务，初始化系统所需的上下文信息（包括事务对象指针、锁管理器指针、日志管理器指针、存放结果的buffer、记录结果长度的变量）
-        Context *context = new Context(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset,
-                                       txn_manager.get(), &session_isolation_level, &isolation_output_format,
-                                       &output_file_enabled);
+        auto context = std::make_unique<Context>(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset,
+                                                 txn_manager.get(), &session_isolation_level,
+                                                 &isolation_output_format, &output_file_enabled);
 
         std::string raw_cmd = trim_command(data_recv);
         if (lower_command(raw_cmd) == "set output_file off") {
@@ -186,14 +185,14 @@ void *client_handler(void *sock_fd) {
         std::string load_table;
         if (parse_load_command(raw_cmd, load_file, load_table)) {
             try {
-                EnsureStatementTransaction(&txn_id, context, session_isolation_level);
-                sm_manager->load_table(load_file, load_table, context);
+                EnsureStatementTransaction(&txn_id, context.get(), session_isolation_level);
+                sm_manager->load_table(load_file, load_table, context.get());
             } catch (TransactionAbortException &e) {
                 std::string str = "abort\n";
                 memcpy(data_send, str.c_str(), str.length());
                 data_send[str.length()] = '\0';
                 offset = str.length();
-                AbortActiveTransaction(&txn_id, context);
+                AbortActiveTransaction(&txn_id, context.get());
                 if (output_file_enabled) {
                     std::fstream outfile;
                     outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
@@ -201,7 +200,7 @@ void *client_handler(void *sock_fd) {
                     outfile.close();
                 }
             } catch (RMDBError &e) {
-                AbortActiveTransaction(&txn_id, context);
+                AbortActiveTransaction(&txn_id, context.get());
                 memcpy(data_send, e.what(), e.get_msg_len());
                 data_send[e.get_msg_len()] = '\n';
                 data_send[e.get_msg_len() + 1] = '\0';
@@ -239,13 +238,13 @@ void *client_handler(void *sock_fd) {
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
                     if (query_needs_transaction(query)) {
-                        EnsureStatementTransaction(&txn_id, context, session_isolation_level);
+                        EnsureStatementTransaction(&txn_id, context.get(), session_isolation_level);
                     }
                     // 优化器
-                    std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
+                    std::shared_ptr<Plan> plan = optimizer->plan_query(query, context.get());
                     // portal
-                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
-                    portal->run(portalStmt, ql_manager.get(), &txn_id, context);
+                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context.get());
+                    portal->run(portalStmt, ql_manager.get(), &txn_id, context.get());
                     portal->drop();
                     if (std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
                         isolation_output_format.store(true);
@@ -258,8 +257,7 @@ void *client_handler(void *sock_fd) {
                     offset = str.length();
 
                     // 回滚事务
-                    AbortActiveTransaction(&txn_id, context);
-                    std::cout << e.GetInfo() << std::endl;
+                    AbortActiveTransaction(&txn_id, context.get());
 
                     if (output_file_enabled) {
                         std::fstream outfile;
@@ -269,8 +267,7 @@ void *client_handler(void *sock_fd) {
                     }
                 } catch (RMDBError &e) {
                     // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
-                    std::cerr << e.what() << std::endl;
-                    AbortActiveTransaction(&txn_id, context);
+                    AbortActiveTransaction(&txn_id, context.get());
 
                     memcpy(data_send, e.what(), e.get_msg_len());
                     data_send[e.get_msg_len()] = '\n';
@@ -319,7 +316,7 @@ void *client_handler(void *sock_fd) {
     }
 
     // Clear
-    std::cout << "Terminating current client_connection..." << std::endl;
+    delete[] data_send;
     close(fd);           // close a file descriptor.
     pthread_exit(NULL);  // terminate calling thread!
 }
