@@ -326,15 +326,6 @@ class IndexScanExecutor : public AbstractExecutor {
         return batch.size();
     }
 
-    size_t NextRidBatch(std::vector<Rid> &rids, size_t max_batch_size) override {
-        rids.clear();
-        while (rids.size() < max_batch_size && !end_) {
-            rids.push_back(rid_);
-            nextTuple();
-        }
-        return rids.size();
-    }
-
     bool is_end() const override {
         return end_;
     }

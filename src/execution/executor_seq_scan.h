@@ -134,15 +134,6 @@ class SeqScanExecutor : public AbstractExecutor {
         return batch.size();
     }
 
-    size_t NextRidBatch(std::vector<Rid> &rids, size_t max_batch_size) override {
-        rids.clear();
-        while (rids.size() < max_batch_size && scan_ != nullptr && !scan_->is_end()) {
-            rids.push_back(rid_);
-            nextTuple();
-        }
-        return rids.size();
-    }
-
     const std::vector<ColMeta> &cols() const override { return cols_; }
 
     size_t tupleLen() const override { return len_; }

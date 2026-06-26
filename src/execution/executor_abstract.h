@@ -68,15 +68,6 @@ class AbstractExecutor {
         return batch.size();
     }
 
-    virtual size_t NextRidBatch(std::vector<Rid> &rids, size_t max_batch_size) {
-        rids.clear();
-        while (rids.size() < max_batch_size && !is_end()) {
-            rids.push_back(rid());
-            nextTuple();
-        }
-        return rids.size();
-    }
-
     virtual bool bind_join_key(const RmRecord &, const std::vector<ColMeta> &) { return false; }
 
     virtual ColMeta get_col_offset(const TabCol &target) { return ColMeta();};
