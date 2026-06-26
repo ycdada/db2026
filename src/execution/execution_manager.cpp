@@ -264,26 +264,35 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
         captions.push_back(sel_col.col_name);
     }
 
+    constexpr size_t SELECT_BATCH_SIZE = 256;
     std::vector<std::vector<std::string>> rows;
-    for (executorTreeRoot->beginTuple(); !executorTreeRoot->is_end(); executorTreeRoot->nextTuple()) {
-        auto Tuple = executorTreeRoot->Next();
-        std::vector<std::string> columns;
-        for (auto &col : executorTreeRoot->cols()) {
-            std::string col_str;
-            char *rec_buf = Tuple->data + col.offset;
-            if (col.type == TYPE_INT) {
-                col_str = std::to_string(*(int *)rec_buf);
-            } else if (col.type == TYPE_FLOAT) {
-                std::ostringstream os;
-                os << std::fixed << std::setprecision(6) << *(float *)rec_buf;
-                col_str = os.str();
-            } else if (col.type == TYPE_STRING) {
-                col_str = std::string((char *)rec_buf, col.len);
-                col_str.resize(strlen(col_str.c_str()));
-            }
-            columns.push_back(col_str);
+    std::vector<std::unique_ptr<RmRecord>> batch;
+    batch.reserve(SELECT_BATCH_SIZE);
+    executorTreeRoot->beginTuple();
+    while (!executorTreeRoot->is_end()) {
+        size_t batch_size = executorTreeRoot->NextBatch(batch, SELECT_BATCH_SIZE);
+        if (batch_size == 0) {
+            break;
         }
-        rows.push_back(std::move(columns));
+        for (auto &Tuple : batch) {
+            std::vector<std::string> columns;
+            for (auto &col : executorTreeRoot->cols()) {
+                std::string col_str;
+                char *rec_buf = Tuple->data + col.offset;
+                if (col.type == TYPE_INT) {
+                    col_str = std::to_string(*(int *)rec_buf);
+                } else if (col.type == TYPE_FLOAT) {
+                    std::ostringstream os;
+                    os << std::fixed << std::setprecision(6) << *(float *)rec_buf;
+                    col_str = os.str();
+                } else if (col.type == TYPE_STRING) {
+                    col_str = std::string((char *)rec_buf, col.len);
+                    col_str.resize(strlen(col_str.c_str()));
+                }
+                columns.push_back(col_str);
+            }
+            rows.push_back(std::move(columns));
+        }
     }
     executorTreeRoot->finish();
 

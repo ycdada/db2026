@@ -10,6 +10,7 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <array>
 #include <mutex>
 #include <condition_variable>
 #include "transaction/transaction.h"
@@ -64,6 +65,14 @@ public:
 private:
     bool lock(Transaction *txn, LockDataId lid, LockMode mode);
 
-    std::mutex latch_;      // 用于锁表的并发
-    std::unordered_map<LockDataId, LockRequestQueue> lock_table_;   // 全局锁表
+    struct LockTableShard {
+        std::mutex latch_;
+        std::unordered_map<LockDataId, LockRequestQueue> lock_table_;
+    };
+
+    static constexpr size_t LOCK_TABLE_SHARD_COUNT = 64;
+
+    LockTableShard &get_shard(const LockDataId &lock_data_id);
+
+    std::array<LockTableShard, LOCK_TABLE_SHARD_COUNT> lock_table_shards_;
 };

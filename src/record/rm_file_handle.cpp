@@ -18,6 +18,10 @@ See the Mulan PSL v2 for more details. */
  */
 std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid& rid, Context* context) const {
     std::shared_lock<std::shared_mutex> guard(latch_);
+    auto mem_it = memory_records_.find(memory_key(rid));
+    if (mem_it != memory_records_.end()) {
+        return std::make_unique<RmRecord>(*mem_it->second);
+    }
     // Todo:
     // 1. 获取指定记录所在的page handle
     RmPageHandle page_handle = fetch_page_handle(rid.page_no);
@@ -52,9 +56,12 @@ Rid RmFileHandle::insert_record(char* buf, Context* context) {
         file_hdr_.first_free_page_no = page_handle.page_hdr->next_free_page_no;
         page_handle.page_hdr->next_free_page_no = RM_NO_PAGE;
     }
+    page_id_t page_no = page_handle.page->get_page_id().page_no;
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
-    return Rid{page_handle.page->get_page_id().page_no, slot_no};
+    memory_records_[memory_key(Rid{page_no, slot_no})] =
+        std::make_unique<RmRecord>(file_hdr_.record_size, buf);
+    return Rid{page_no, slot_no};
 
 }
 
@@ -76,6 +83,7 @@ void RmFileHandle::insert_record(const Rid& rid, char* buf) {
     }
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
+    memory_records_[memory_key(rid)] = std::make_unique<RmRecord>(file_hdr_.record_size, buf);
 }
 
 /**
@@ -97,6 +105,7 @@ void RmFileHandle::delete_record(const Rid& rid, Context* context) {
     }
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
+    memory_records_.erase(memory_key(rid));
 }
 
 
@@ -116,6 +125,7 @@ void RmFileHandle::update_record(const Rid& rid, char* buf, Context* context) {
     memcpy(slot, buf, file_hdr_.record_size);
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
+    memory_records_[memory_key(rid)] = std::make_unique<RmRecord>(file_hdr_.record_size, buf);
 
 }
 
@@ -127,6 +137,28 @@ void RmFileHandle::reset_data_pages() {
     file_hdr_.num_pages = RM_FIRST_RECORD_PAGE;
     file_hdr_.first_free_page_no = RM_NO_PAGE;
     disk_manager_->set_fd2pageno(fd_, file_hdr_.num_pages);
+    memory_records_.clear();
+}
+
+void RmFileHandle::reserve_memory_records(size_t count) {
+    std::unique_lock<std::shared_mutex> guard(latch_);
+    memory_records_.reserve(count);
+}
+
+std::vector<Rid> RmFileHandle::snapshot_rids() const {
+    std::shared_lock<std::shared_mutex> guard(latch_);
+    std::vector<Rid> rids;
+    rids.reserve(memory_records_.size());
+    for (auto &entry : memory_records_) {
+        rids.push_back(key_to_rid(entry.first));
+    }
+    std::sort(rids.begin(), rids.end(), [](const Rid &lhs, const Rid &rhs) {
+        if (lhs.page_no != rhs.page_no) {
+            return lhs.page_no < rhs.page_no;
+        }
+        return lhs.slot_no < rhs.slot_no;
+    });
+    return rids;
 }
 
 /**
@@ -208,4 +240,21 @@ void RmFileHandle::release_page_handle(RmPageHandle&page_handle) {
     page_handle.page_hdr->next_free_page_no = file_hdr_.first_free_page_no;
     // 2. file_hdr_.first_free_page_no
     file_hdr_.first_free_page_no = page_handle.page->get_page_id().page_no;
+}
+
+void RmFileHandle::load_memory_records() {
+    std::unique_lock<std::shared_mutex> guard(latch_);
+    memory_records_.clear();
+    int file_pages = disk_manager_->get_file_size(disk_manager_->get_file_name(fd_)) / PAGE_SIZE;
+    int loaded_pages = std::min(file_hdr_.num_pages, file_pages);
+    for (int page_no = RM_FIRST_RECORD_PAGE; page_no < loaded_pages; ++page_no) {
+        RmPageHandle page_handle = fetch_page_handle(page_no);
+        for (int slot_no = 0; slot_no < file_hdr_.num_records_per_page; ++slot_no) {
+            if (Bitmap::is_set(page_handle.bitmap, slot_no)) {
+                memory_records_[memory_key(Rid{page_no, slot_no})] =
+                    std::make_unique<RmRecord>(file_hdr_.record_size, page_handle.get_slot(slot_no));
+            }
+        }
+        buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
+    }
 }

@@ -12,8 +12,11 @@ See the Mulan PSL v2 for more details. */
 
 #include <assert.h>
 
+#include <algorithm>
 #include <memory>
 #include <shared_mutex>
+#include <unordered_map>
+#include <vector>
 
 #include "bitmap.h"
 #include "common/context.h"
@@ -52,6 +55,7 @@ class RmFileHandle {
     int fd_;        // 打开文件后产生的文件句柄
     RmFileHdr file_hdr_;    // 文件头，维护当前表文件的元数据
     mutable std::shared_mutex latch_;
+    std::unordered_map<int64_t, std::unique_ptr<RmRecord>> memory_records_;
 
    public:
     RmFileHandle(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, int fd)
@@ -62,6 +66,7 @@ class RmFileHandle {
         disk_manager_->read_page(fd, RM_FILE_HDR_PAGE, (char *)&file_hdr_, sizeof(file_hdr_));
         // disk_manager管理的fd对应的文件中，设置从file_hdr_.num_pages开始分配page_no
         disk_manager_->set_fd2pageno(fd, file_hdr_.num_pages);
+        load_memory_records();
     }
 
     RmFileHdr get_file_hdr() {
@@ -77,10 +82,7 @@ class RmFileHandle {
     /* 判断指定位置上是否已经存在一条记录，通过Bitmap来判断 */
     bool is_record(const Rid &rid) const {
         std::shared_lock<std::shared_mutex> guard(latch_);
-        RmPageHandle page_handle = fetch_page_handle(rid.page_no);
-        bool exists = Bitmap::is_set(page_handle.bitmap, rid.slot_no);  // page的slot_no位置上是否有record
-        buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
-        return exists;
+        return memory_records_.find(memory_key(rid)) != memory_records_.end();
     }
 
     std::unique_ptr<RmRecord> get_record(const Rid &rid, Context *context) const;
@@ -95,6 +97,10 @@ class RmFileHandle {
 
     void reset_data_pages();
 
+    void reserve_memory_records(size_t count);
+
+    std::vector<Rid> snapshot_rids() const;
+
     RmPageHandle create_new_page_handle();
 
     RmPageHandle fetch_page_handle(int page_no) const;
@@ -105,4 +111,14 @@ class RmFileHandle {
     RmPageHandle create_page_handle();
 
     void release_page_handle(RmPageHandle &page_handle);
+
+    void load_memory_records();
+
+    static int64_t memory_key(const Rid &rid) {
+        return (static_cast<int64_t>(rid.page_no) << 32) | static_cast<uint32_t>(rid.slot_no);
+    }
+
+    static Rid key_to_rid(int64_t key) {
+        return Rid{static_cast<int>(key >> 32), static_cast<int>(key & 0xffffffff)};
+    }
 };

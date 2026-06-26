@@ -315,6 +315,7 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
         });
     }
 
+    fh->reserve_memory_records(records.size());
     for (auto &rec : records) {
         Rid rid = fh->insert_record(rec->data, context);
         std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_index_entries;

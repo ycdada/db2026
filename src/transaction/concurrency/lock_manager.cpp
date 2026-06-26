@@ -10,6 +10,10 @@ See the Mulan PSL v2 for more details. */
 
 #include "lock_manager.h"
 
+LockManager::LockTableShard &LockManager::get_shard(const LockDataId &lock_data_id) {
+    return lock_table_shards_[std::hash<LockDataId>{}(lock_data_id) % LOCK_TABLE_SHARD_COUNT];
+}
+
 /**
  * @description: 通用加锁实现（no-wait 2PL）
  * @return true 加锁成功
@@ -72,9 +76,10 @@ bool LockManager::lock(Transaction *txn, LockDataId lid, LockMode mode) {
         throw TransactionAbortException(txn->get_transaction_id(), AbortReason::LOCK_ON_SHIRINKING);
     }
 
-    std::lock_guard<std::mutex> guard(latch_);
+    auto &shard = get_shard(lid);
+    std::lock_guard<std::mutex> guard(shard.latch_);
 
-    auto &queue = lock_table_[lid];
+    auto &queue = shard.lock_table_[lid];
 
     LockRequest *own_request = nullptr;
     for (auto &req : queue.request_queue_) {
@@ -138,10 +143,11 @@ bool LockManager::lock_IX_on_table(Transaction *txn, int tab_fd) {
  * @return true 解锁成功
  */
 bool LockManager::unlock(Transaction *txn, LockDataId lock_data_id) {
-    std::lock_guard<std::mutex> guard(latch_);
+    auto &shard = get_shard(lock_data_id);
+    std::lock_guard<std::mutex> guard(shard.latch_);
 
-    auto it = lock_table_.find(lock_data_id);
-    if (it == lock_table_.end()) return false;
+    auto it = shard.lock_table_.find(lock_data_id);
+    if (it == shard.lock_table_.end()) return false;
 
     auto &queue = it->second;
     for (auto req_it = queue.request_queue_.begin(); req_it != queue.request_queue_.end(); ++req_it) {
@@ -182,7 +188,7 @@ bool LockManager::unlock(Transaction *txn, LockDataId lock_data_id) {
 
     // 清理空队列
     if (queue.request_queue_.empty()) {
-        lock_table_.erase(it);
+        shard.lock_table_.erase(it);
     }
 
     return true;
