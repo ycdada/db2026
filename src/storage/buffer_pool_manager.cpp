@@ -242,6 +242,7 @@ Page* BufferPoolManager::new_page(PageId* page_id) {
     frame_id_t frame_id;
     if (!find_victim_page(shard, &frame_id)) {
         // 缓冲池已满且所有页都被pin住，无法创建新页
+        disk_manager_->rollback_allocated_page(page_id->fd, page_id->page_no);
         return nullptr;
     }
 

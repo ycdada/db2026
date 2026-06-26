@@ -128,10 +128,8 @@ void SmManager::flush_meta() {
 
 void SmManager::create_static_checkpoint(LogManager* log_manager) {
     std::scoped_lock<std::mutex> lock(checkpoint_latch_);
-    int checkpoint_start = disk_manager_->get_file_size(db_.name() + "/" + LOG_FILE_NAME);
     if (log_manager != nullptr) {
         log_manager->flush_log_to_disk();
-        checkpoint_start = disk_manager_->get_file_size(db_.name() + "/" + LOG_FILE_NAME);
         CheckpointLogRecord checkpoint;
         log_manager->add_log_record(&checkpoint);
         log_manager->flush_log_to_disk();
@@ -149,8 +147,10 @@ void SmManager::create_static_checkpoint(LogManager* log_manager) {
     }
     flush_meta();
 
+    // This checkpoint does not persist an active transaction table. Keep recovery
+    // scanning from the beginning so flushed uncommitted changes can still undo.
     std::ofstream ofs(db_.name() + "/" + RESTART_FILE_NAME, std::ios::out | std::ios::trunc);
-    ofs << std::max(0, checkpoint_start);
+    ofs << 0;
 }
 
 static std::vector<std::string> split_csv_line(const std::string &line) {
@@ -545,6 +545,9 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
     ix_manager_->create_index(file_path, index_cols);
     std::string ix_name = ix_manager_->get_index_name(tab_name, index_cols);
     auto ih = ix_manager_->open_index(file_path, index_cols);
+    RmFileHandle *clustered_fh = nullptr;
+    bool clustered_table_reset = false;
+    std::vector<std::unique_ptr<RmRecord>> clustered_backup;
 
     try {
         RmFileHandle *fh = fhs_.at(tab_name).get();
@@ -553,6 +556,11 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
             std::vector<std::unique_ptr<RmRecord>> records;
             for (RmScan scan(fh); !scan.is_end(); scan.next()) {
                 records.push_back(fh->get_record(scan.rid(), context));
+            }
+            clustered_fh = fh;
+            clustered_backup.reserve(records.size());
+            for (auto &rec : records) {
+                clustered_backup.push_back(std::make_unique<RmRecord>(*rec));
             }
             IndexMeta temp_index;
             temp_index.tab_name = tab_name;
@@ -568,6 +576,7 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
                 }
             }
             fh->reset_data_pages();
+            clustered_table_reset = true;
             for (auto &rec : records) {
                 Rid rid = fh->insert_record(rec->data, context);
                 std::vector<char> key(col_tot_len);
@@ -599,6 +608,14 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
             }
         }
     } catch (...) {
+        if (clustered_table_reset && clustered_fh != nullptr) {
+            clustered_fh->reset_data_pages();
+            for (auto &rec : clustered_backup) {
+                clustered_fh->insert_record(rec->data, nullptr);
+            }
+            clustered_fh->flush_file_hdr();
+            buffer_pool_manager_->flush_all_pages(clustered_fh->GetFd());
+        }
         ix_manager_->close_index(ih.get());
         ix_manager_->destroy_index(file_path, index_cols);
         throw;

@@ -85,6 +85,12 @@ page_id_t DiskManager::allocate_page(int fd) {
     return fd2pageno_[fd]++;
 }
 
+bool DiskManager::rollback_allocated_page(int fd, page_id_t page_no) {
+    assert(fd >= 0 && fd < MAX_FD);
+    page_id_t expected = page_no + 1;
+    return fd2pageno_[fd].compare_exchange_strong(expected, page_no);
+}
+
 void DiskManager::deallocate_page(__attribute__((unused)) page_id_t page_id) {}
 
 bool DiskManager::is_dir(const std::string& path) {

@@ -38,6 +38,8 @@ class DiskManager {
 
     page_id_t allocate_page(int fd);
 
+    bool rollback_allocated_page(int fd, page_id_t page_no);
+
     void deallocate_page(page_id_t page_id);
 
     /*目录操作*/
