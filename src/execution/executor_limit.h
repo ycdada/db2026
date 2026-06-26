@@ -38,6 +38,18 @@ class LimitExecutor : public AbstractExecutor {
         return prev_->Next();
     }
 
+    size_t NextBatch(std::vector<std::unique_ptr<RmRecord>> &batch, size_t max_batch_size) override {
+        batch.clear();
+        if (is_end()) {
+            return 0;
+        }
+        size_t remaining = static_cast<size_t>(limit_ - emitted_);
+        size_t n = prev_->NextBatch(batch, std::min(max_batch_size, remaining));
+        emitted_ += static_cast<int>(n);
+        rows_ += n;
+        return n;
+    }
+
     const std::vector<ColMeta> &cols() const override { return prev_->cols(); }
 
     size_t tupleLen() const override { return prev_->tupleLen(); }

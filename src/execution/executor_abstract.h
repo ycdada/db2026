@@ -10,6 +10,9 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <memory>
+#include <vector>
+
 #include "execution_defs.h"
 #include "common/common.h"
 #include "index/ix.h"
@@ -52,6 +55,27 @@ class AbstractExecutor {
     virtual Rid &rid() = 0;
 
     virtual std::unique_ptr<RmRecord> Next() = 0;
+
+    virtual size_t NextBatch(std::vector<std::unique_ptr<RmRecord>> &batch, size_t max_batch_size) {
+        batch.clear();
+        while (batch.size() < max_batch_size && !is_end()) {
+            auto rec = Next();
+            if (rec != nullptr) {
+                batch.push_back(std::move(rec));
+            }
+            nextTuple();
+        }
+        return batch.size();
+    }
+
+    virtual size_t NextRidBatch(std::vector<Rid> &rids, size_t max_batch_size) {
+        rids.clear();
+        while (rids.size() < max_batch_size && !is_end()) {
+            rids.push_back(rid());
+            nextTuple();
+        }
+        return rids.size();
+    }
 
     virtual bool bind_join_key(const RmRecord &, const std::vector<ColMeta> &) { return false; }
 

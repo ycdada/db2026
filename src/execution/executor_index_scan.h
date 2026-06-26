@@ -314,6 +314,27 @@ class IndexScanExecutor : public AbstractExecutor {
         return std::make_unique<RmRecord>(*cur_rec_);
     }
 
+    size_t NextBatch(std::vector<std::unique_ptr<RmRecord>> &batch, size_t max_batch_size) override {
+        batch.clear();
+        while (batch.size() < max_batch_size && !end_) {
+            if (cur_rec_ != nullptr) {
+                rows_++;
+                batch.push_back(std::make_unique<RmRecord>(*cur_rec_));
+            }
+            nextTuple();
+        }
+        return batch.size();
+    }
+
+    size_t NextRidBatch(std::vector<Rid> &rids, size_t max_batch_size) override {
+        rids.clear();
+        while (rids.size() < max_batch_size && !end_) {
+            rids.push_back(rid_);
+            nextTuple();
+        }
+        return rids.size();
+    }
+
     bool is_end() const override {
         return end_;
     }

@@ -70,6 +70,18 @@ class FilterExecutor : public AbstractExecutor {
         return out;
     }
 
+    size_t NextBatch(std::vector<std::unique_ptr<RmRecord>> &batch, size_t max_batch_size) override {
+        batch.clear();
+        while (batch.size() < max_batch_size && !is_end_) {
+            if (cur_ != nullptr) {
+                batch.push_back(std::make_unique<RmRecord>(*cur_));
+                rows_++;
+            }
+            nextTuple();
+        }
+        return batch.size();
+    }
+
     const std::vector<ColMeta> &cols() const override { return prev_->cols(); }
 
     size_t tupleLen() const override { return prev_->tupleLen(); }

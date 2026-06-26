@@ -32,6 +32,12 @@ class RenameExecutor : public AbstractExecutor {
         return rec;
     }
 
+    size_t NextBatch(std::vector<std::unique_ptr<RmRecord>> &batch, size_t max_batch_size) override {
+        size_t n = prev_->NextBatch(batch, max_batch_size);
+        rows_ += n;
+        return n;
+    }
+
     const std::vector<ColMeta> &cols() const override { return cols_; }
 
     size_t tupleLen() const override { return len_; }

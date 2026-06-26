@@ -70,6 +70,26 @@ class ProjectionExecutor : public AbstractExecutor {
         return proj_rec;
     }
 
+    size_t NextBatch(std::vector<std::unique_ptr<RmRecord>> &batch, size_t max_batch_size) override {
+        std::vector<std::unique_ptr<RmRecord>> input;
+        input.reserve(max_batch_size);
+        size_t n = prev_->NextBatch(input, max_batch_size);
+        batch.clear();
+        batch.reserve(n);
+        for (auto &prev_rec : input) {
+            auto proj_rec = std::make_unique<RmRecord>(len_);
+            for (size_t i = 0; i < sel_idxs_.size(); i++) {
+                size_t prev_offset = prev_->cols()[sel_idxs_[i]].offset;
+                memcpy(proj_rec->data + cols_[i].offset,
+                       prev_rec->data + prev_offset,
+                       cols_[i].len);
+            }
+            batch.push_back(std::move(proj_rec));
+        }
+        rows_ += batch.size();
+        return batch.size();
+    }
+
     const std::vector<ColMeta> &cols() const override { return cols_; }
 
     size_t tupleLen() const override { return len_; }
