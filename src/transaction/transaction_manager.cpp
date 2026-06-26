@@ -142,6 +142,17 @@ bool eval_txn_conds(const char *rec_data, const std::vector<ColMeta> &cols,
 
 }
 
+TransactionManager::~TransactionManager() {
+    for (auto *txn : free_txns_) {
+        delete txn;
+    }
+    free_txns_.clear();
+    for (auto &entry : txn_map) {
+        delete entry.second;
+    }
+    txn_map.clear();
+}
+
 /**
  * @description: 事务的开始方法
  * @return {Transaction*} 开始事务的指针
@@ -159,12 +170,17 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
     if (new_txn) {
         // 创建新事务
         txn_id_t new_txn_id = next_txn_id_++;
-        txn = new Transaction(new_txn_id, isolation_level);
+        std::unique_lock<std::mutex> lock(latch_);
+        if (!free_txns_.empty()) {
+            txn = free_txns_.back();
+            free_txns_.pop_back();
+            txn->Reset(new_txn_id, isolation_level);
+        } else {
+            txn = new Transaction(new_txn_id, isolation_level);
+        }
         txn->set_mvcc_enabled(isolation_level == IsolationLevel::SNAPSHOT_ISOLATION ||
                               isolation_level == IsolationLevel::SERIALIZABLE);
         txn->set_state(TransactionState::DEFAULT);
-
-        std::unique_lock<std::mutex> lock(latch_);
         txn_map[new_txn_id] = txn;
     }
     // 如果是已有事务，直接复用
@@ -177,6 +193,24 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
         active_mvcc_txn_count_.fetch_add(1);
     }
     return txn;
+}
+
+void TransactionManager::release_transaction(Transaction *txn) {
+    if (txn == nullptr) {
+        return;
+    }
+    auto state = txn->get_state();
+    if (state != TransactionState::COMMITTED && state != TransactionState::ABORTED) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(latch_);
+    auto it = txn_map.find(txn->get_transaction_id());
+    if (it == txn_map.end() || it->second != txn) {
+        return;
+    }
+    txn_map.erase(it);
+    free_txns_.push_back(txn);
 }
 
 bool TransactionManager::IsMvccTxn(Transaction *txn) const {

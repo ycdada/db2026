@@ -70,7 +70,27 @@ class Transaction {
         thread_id_ = std::this_thread::get_id();
     }
 
-    ~Transaction() = default;
+    ~Transaction() { ClearWriteSet(); }
+
+    void Reset(txn_id_t txn_id, IsolationLevel isolation_level = IsolationLevel::READ_COMMITTED) {
+        txn_mode_ = false;
+        state_ = TransactionState::DEFAULT;
+        isolation_level_ = isolation_level;
+        mvcc_enabled_ = false;
+        thread_id_ = std::this_thread::get_id();
+        prev_lsn_ = INVALID_LSN;
+        txn_id_ = txn_id;
+        start_ts_ = 0;
+        read_ts_.store(0);
+        commit_ts_.store(INVALID_TS);
+
+        ClearWriteSet();
+        if (lock_set_ != nullptr) lock_set_->clear();
+        if (index_latch_page_set_ != nullptr) index_latch_page_set_->clear();
+        if (index_deleted_page_set_ != nullptr) index_deleted_page_set_->clear();
+        undo_logs_.clear();
+        mvcc_write_keys_.clear();
+    }
 
     inline txn_id_t get_transaction_id() { return txn_id_; }
 
@@ -160,5 +180,15 @@ class Transaction {
   std::vector<UndoLog> undo_logs_;
   /** 用于访问事务级撤销日志的锁。 */
   std::mutex latch_;
-  std::set<std::string> mvcc_write_keys_;
+    std::set<std::string> mvcc_write_keys_;
+
+    void ClearWriteSet() {
+        if (write_set_ == nullptr) {
+            return;
+        }
+        while (!write_set_->empty()) {
+            delete write_set_->back();
+            write_set_->pop_back();
+        }
+    }
 };

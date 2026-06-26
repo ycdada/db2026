@@ -92,6 +92,7 @@ static void AbortActiveTransaction(txn_id_t *txn_id, Context *context) {
         context->txn_->get_state() != TransactionState::ABORTED) {
         txn_manager->abort(context->txn_, context->log_mgr_);
     }
+    txn_manager->release_transaction(context->txn_);
     *txn_id = INVALID_TXN_ID;
     context->txn_ = nullptr;
 }
@@ -220,6 +221,8 @@ void *client_handler(void *sock_fd) {
                context->txn_->get_state() != TransactionState::ABORTED)
             {
                 txn_manager->commit(context->txn_, context->log_mgr_);
+                txn_manager->release_transaction(context->txn_);
+                context->txn_ = nullptr;
                 txn_id = INVALID_TXN_ID;
             }
             continue;
@@ -311,6 +314,8 @@ void *client_handler(void *sock_fd) {
            context->txn_->get_state() != TransactionState::ABORTED)
         {
             txn_manager->commit(context->txn_, context->log_mgr_);
+            txn_manager->release_transaction(context->txn_);
+            context->txn_ = nullptr;
             txn_id = INVALID_TXN_ID;
         }
     }

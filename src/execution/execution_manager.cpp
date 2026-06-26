@@ -173,6 +173,7 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                     context->txn_->get_state() != TransactionState::ABORTED) {
                     txn_mgr_->commit(context->txn_, context->log_mgr_);
                 }
+                txn_mgr_->release_transaction(context->txn_);
                 *txn_id = INVALID_TXN_ID;
                 context->txn_ = nullptr;
                 break;
@@ -185,6 +186,7 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                     context->txn_->get_state() != TransactionState::ABORTED) {
                     txn_mgr_->abort(context->txn_, context->log_mgr_);
                 }
+                txn_mgr_->release_transaction(context->txn_);
                 *txn_id = INVALID_TXN_ID;
                 context->txn_ = nullptr;
                 break;
@@ -197,6 +199,7 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                     context->txn_->get_state() != TransactionState::ABORTED) {
                     txn_mgr_->abort(context->txn_, context->log_mgr_);
                 }
+                txn_mgr_->release_transaction(context->txn_);
                 *txn_id = INVALID_TXN_ID;
                 context->txn_ = nullptr;
                 break;

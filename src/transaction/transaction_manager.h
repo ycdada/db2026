@@ -58,7 +58,7 @@ public:
         concurrency_mode_ = concurrency_mode;
     }
     
-    ~TransactionManager() = default;
+    ~TransactionManager();
 
     Transaction* begin(Transaction* txn, LogManager* log_manager,
                        IsolationLevel isolation_level = IsolationLevel::READ_COMMITTED);
@@ -66,6 +66,8 @@ public:
     void commit(Transaction* txn, LogManager* log_manager);
 
     void abort(Transaction* txn, LogManager* log_manager);
+
+    void release_transaction(Transaction* txn);
 
     ConcurrencyMode get_concurrency_mode() { return concurrency_mode_; }
 
@@ -178,6 +180,7 @@ private:
     std::mutex latch_;  // 用于txn_map的并发
     SmManager *sm_manager_;
     LockManager *lock_manager_;
+    std::vector<Transaction *> free_txns_;
 
     std::atomic<timestamp_t> last_commit_ts_{0};    // 最后提交的时间戳,仅用于MVCC
     std::atomic<int> active_mvcc_txn_count_{0};
