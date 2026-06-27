@@ -97,6 +97,20 @@ static void AbortActiveTransaction(txn_id_t *txn_id, Context *context) {
     context->txn_ = nullptr;
 }
 
+static void AbortTransactionById(txn_id_t *txn_id) {
+    if (txn_id == nullptr || *txn_id == INVALID_TXN_ID) {
+        return;
+    }
+    Transaction *txn = txn_manager->get_transaction(*txn_id);
+    if (txn != nullptr &&
+        txn->get_state() != TransactionState::COMMITTED &&
+        txn->get_state() != TransactionState::ABORTED) {
+        txn_manager->abort(txn, log_manager.get());
+    }
+    txn_manager->release_transaction(txn);
+    *txn_id = INVALID_TXN_ID;
+}
+
 static std::string trim_command(std::string s) {
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
         s.erase(s.begin());
@@ -321,6 +335,7 @@ void *client_handler(void *sock_fd) {
     }
 
     // Clear
+    AbortTransactionById(&txn_id);
     delete[] data_send;
     close(fd);           // close a file descriptor.
     pthread_exit(NULL);  // terminate calling thread!

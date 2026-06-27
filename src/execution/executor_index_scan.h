@@ -88,6 +88,9 @@ class IndexScanExecutor : public AbstractExecutor {
     bool load_visible_index_current() {
         auto rid = scan_->rid();
         seen_rids_.insert({rid.page_no, rid.slot_no});
+        if (use_2pl_locks()) {
+            context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid, fh_->GetFd());
+        }
         std::unique_ptr<RmRecord> physical;
         try {
             physical = fh_->get_record(rid, context_);
@@ -101,9 +104,6 @@ class IndexScanExecutor : public AbstractExecutor {
             rec = std::move(physical);
         }
         if (rec != nullptr && eval_conds(rec->data, cols_, fed_conds_)) {
-            if (use_2pl_locks()) {
-                context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid, fh_->GetFd());
-            }
             cur_rec_ = std::move(rec);
             rid_ = rid;
             returned_rids_.push_back(rid_);

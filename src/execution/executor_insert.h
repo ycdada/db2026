@@ -86,6 +86,9 @@ class InsertExecutor : public AbstractExecutor {
         // Insert into index
         std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_index_entries;
         try {
+            if (use_2pl_locks) {
+                context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid_, fh_->GetFd());
+            }
             for(auto &index : tab_.indexes) {
                 auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
                 std::vector<char> key(index.col_tot_len);
@@ -100,13 +103,16 @@ class InsertExecutor : public AbstractExecutor {
                 inserted_index_entries.emplace_back(ih, std::move(key));
             }
         } catch (...) {
-            if (mvcc) {
-                context_->txn_mgr_->abort(context_->txn_, context_->log_mgr_);
-            } else {
-                for (auto &entry : inserted_index_entries) {
-                    entry.first->delete_entry(entry.second.data(), context_->txn_);
-                }
+            for (auto &entry : inserted_index_entries) {
+                entry.first->delete_entry(entry.second.data(), context_ != nullptr ? context_->txn_ : nullptr);
+            }
+            if (fh_->is_record(rid_)) {
                 fh_->delete_record(rid_, context_);
+            }
+            if (version_writes && context_ != nullptr && context_->txn_mgr_ != nullptr && context_->txn_ != nullptr &&
+                context_->txn_->get_state() != TransactionState::COMMITTED &&
+                context_->txn_->get_state() != TransactionState::ABORTED) {
+                context_->txn_mgr_->abort(context_->txn_, context_->log_mgr_);
             }
             throw;
         }

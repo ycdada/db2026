@@ -48,24 +48,25 @@ class SeqScanExecutor : public AbstractExecutor {
     }
 
     bool load_visible_current() {
+        Rid current_rid = scan_->rid();
+        if (use_2pl_locks()) {
+            context_->lock_mgr_->lock_shared_on_record(context_->txn_, current_rid, fh_->GetFd());
+        }
         std::unique_ptr<RmRecord> physical;
         try {
-            physical = fh_->get_record(scan_->rid(), context_);
+            physical = fh_->get_record(current_rid, context_);
         } catch (const RecordNotFoundError &) {
             return false;
         }
         std::unique_ptr<RmRecord> visible;
         if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
-            visible = context_->txn_mgr_->GetVisibleRecord(tab_name_, scan_->rid(), *physical, context_->txn_);
+            visible = context_->txn_mgr_->GetVisibleRecord(tab_name_, current_rid, *physical, context_->txn_);
         } else {
             visible = std::move(physical);
         }
 	        if (visible != nullptr && eval_conds(visible->data, cols_, fed_conds_)) {
-            if (use_2pl_locks()) {
-                context_->lock_mgr_->lock_shared_on_record(context_->txn_, scan_->rid(), fh_->GetFd());
-            }
 	            cur_rec_ = std::move(visible);
-	            rid_ = scan_->rid();
+	            rid_ = current_rid;
 	            returned_rids_.push_back(rid_);
 	            return true;
 	        }
