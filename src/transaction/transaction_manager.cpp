@@ -212,7 +212,8 @@ void TransactionManager::release_transaction(Transaction *txn) {
         !txn->get_index_latch_page_set()->empty() || !txn->get_index_deleted_page_set()->empty()) {
         return;
     }
-    txn->ClearCompletedState();
+    bool can_reuse = !txn->get_txn_mode() && !txn->is_mvcc() && !txn->has_writes() &&
+                     txn->get_write_set()->empty() && txn->mvcc_write_keys().empty();
 
     std::unique_lock<std::mutex> lock(latch_);
     auto it = txn_map.find(txn->get_transaction_id());
@@ -220,7 +221,13 @@ void TransactionManager::release_transaction(Transaction *txn) {
         return;
     }
     txn_map.erase(it);
-    reusable_txns_[std::this_thread::get_id()].push_back(txn);
+    if (can_reuse) {
+        txn->ClearCompletedState();
+        reusable_txns_[std::this_thread::get_id()].push_back(txn);
+    } else {
+        lock.unlock();
+        delete txn;
+    }
 }
 
 bool TransactionManager::IsMvccTxn(Transaction *txn) const {
