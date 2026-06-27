@@ -140,7 +140,12 @@ public:
     std::string MvccKey(const std::string &tab_name, const Rid &rid) const;
     std::unique_ptr<RmRecord> GetVisibleRecord(const std::string &tab_name, const Rid &rid,
                                                const RmRecord &physical, Transaction *txn);
+    std::unique_ptr<RmRecord> GetVisibleRecord(const std::string &tab_name, const Rid &rid, Transaction *txn,
+                                               const std::function<std::unique_ptr<RmRecord>()> &fetch_physical);
     bool IsVisible(const std::string &tab_name, const Rid &rid, const RmRecord &physical, Transaction *txn);
+    void RegisterPhysicalInsert(const std::string &tab_name, const Rid &rid, Transaction *txn);
+    void UnregisterPhysicalInsert(const std::string &tab_name, const Rid &rid, Transaction *txn);
+    bool OwnsPhysicalInsert(const std::string &tab_name, const Rid &rid, Transaction *txn);
     std::vector<std::pair<Rid, RmRecord>> CollectVisibleVersionRecords(
         const std::string &tab_name, const std::vector<ColMeta> &cols, const std::vector<Condition> &conds,
         const std::set<std::pair<int, int>> &seen_rids, Transaction *txn);
@@ -226,6 +231,8 @@ private:
     };
 
     std::mutex mvcc_latch_;
+    std::mutex physical_insert_latch_;
+    std::unordered_map<std::string, txn_id_t> physical_insert_owners_;
 	    std::unordered_map<std::string, MvccEntry> mvcc_versions_;
 	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_table_keys_;
 	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_index_compensation_keys_;

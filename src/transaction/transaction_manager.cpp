@@ -331,9 +331,54 @@ std::unique_ptr<RmRecord> TransactionManager::GetVisibleRecord(const std::string
     return std::make_unique<RmRecord>(*visible);
 }
 
+std::unique_ptr<RmRecord> TransactionManager::GetVisibleRecord(
+    const std::string &tab_name, const Rid &rid, Transaction *txn,
+    const std::function<std::unique_ptr<RmRecord>()> &fetch_physical) {
+    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    auto physical = fetch_physical();
+    std::string key = MvccKey(tab_name, rid);
+    auto it = mvcc_versions_.find(key);
+    if (it == mvcc_versions_.end()) {
+        return physical;
+    }
+    auto visible = VisibleRecordLocked(key, it->second, *physical, txn);
+    if (!visible.has_value()) {
+        return nullptr;
+    }
+    return std::make_unique<RmRecord>(*visible);
+}
+
 bool TransactionManager::IsVisible(const std::string &tab_name, const Rid &rid,
                                    const RmRecord &physical, Transaction *txn) {
     return GetVisibleRecord(tab_name, rid, physical, txn) != nullptr;
+}
+
+void TransactionManager::RegisterPhysicalInsert(const std::string &tab_name, const Rid &rid, Transaction *txn) {
+    if (txn == nullptr) {
+        return;
+    }
+    std::scoped_lock<std::mutex> lock(physical_insert_latch_);
+    physical_insert_owners_[MvccKey(tab_name, rid)] = txn->get_transaction_id();
+}
+
+void TransactionManager::UnregisterPhysicalInsert(const std::string &tab_name, const Rid &rid, Transaction *txn) {
+    std::scoped_lock<std::mutex> lock(physical_insert_latch_);
+    auto it = physical_insert_owners_.find(MvccKey(tab_name, rid));
+    if (it == physical_insert_owners_.end()) {
+        return;
+    }
+    if (txn == nullptr || it->second == txn->get_transaction_id()) {
+        physical_insert_owners_.erase(it);
+    }
+}
+
+bool TransactionManager::OwnsPhysicalInsert(const std::string &tab_name, const Rid &rid, Transaction *txn) {
+    if (txn == nullptr) {
+        return false;
+    }
+    std::scoped_lock<std::mutex> lock(physical_insert_latch_);
+    auto it = physical_insert_owners_.find(MvccKey(tab_name, rid));
+    return it != physical_insert_owners_.end() && it->second == txn->get_transaction_id();
 }
 
 std::vector<std::pair<Rid, RmRecord>> TransactionManager::CollectVisibleVersionRecords(
@@ -402,7 +447,10 @@ void TransactionManager::GarbageCollection() {
             }
         }
 
-        if (entry.exists && !entry.is_deleted && entry.commit_ts <= watermark && entry.undo_versions.empty()) {
+        if (entry.exists && entry.is_deleted && entry.commit_ts <= watermark) {
+            entry.undo_versions.clear();
+            removable_entries.push_back(entry_pair.first);
+        } else if (entry.exists && !entry.is_deleted && entry.commit_ts <= watermark && entry.undo_versions.empty()) {
             removable_entries.push_back(entry_pair.first);
         }
     }
@@ -410,6 +458,17 @@ void TransactionManager::GarbageCollection() {
         auto it = mvcc_versions_.find(key);
         if (it == mvcc_versions_.end()) {
             continue;
+        }
+        if (it->second.exists && it->second.is_deleted) {
+            auto fh_it = sm_manager_->fhs_.find(it->second.tab_name);
+            if (fh_it != sm_manager_->fhs_.end()) {
+                try {
+                    if (fh_it->second->is_record(it->second.rid)) {
+                        fh_it->second->delete_record(it->second.rid, nullptr);
+                    }
+                } catch (...) {
+                }
+            }
         }
         auto table_it = mvcc_table_keys_.find(it->second.tab_name);
         if (table_it != mvcc_table_keys_.end()) {
@@ -891,7 +950,11 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     auto write_set = txn->get_write_set();
     bool has_writes = !write_set->empty() || !txn->mvcc_write_keys().empty();
     while (!write_set->empty()) {
-        delete write_set->back();
+        WriteRecord *write_record = write_set->back();
+        if (write_record->GetWriteType() == WType::INSERT_TUPLE) {
+            UnregisterPhysicalInsert(write_record->GetTableName(), write_record->GetRid(), txn);
+        }
+        delete write_record;
         write_set->pop_back();
     }
 
@@ -945,6 +1008,9 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             Rid rid = write_record->GetRid();
             std::string key = MvccKey(tab_name, rid);
             if (!processed_keys.insert(key).second) {
+                if (write_record->GetWriteType() == WType::INSERT_TUPLE) {
+                    UnregisterPhysicalInsert(tab_name, rid, txn);
+                }
                 delete write_record;
                 continue;
             }
@@ -952,6 +1018,9 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             std::scoped_lock<std::mutex> lock(mvcc_latch_);
             auto it = mvcc_versions_.find(key);
             if (it == mvcc_versions_.end() || it->second.writer_txn != txn->get_transaction_id()) {
+                if (write_record->GetWriteType() == WType::INSERT_TUPLE) {
+                    UnregisterPhysicalInsert(tab_name, rid, txn);
+                }
                 delete write_record;
                 continue;
             }
@@ -961,6 +1030,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
                     auto rec = fh->get_record(rid, nullptr);
                     delete_index_entries(sm_manager_, tab_name, tab, *rec, txn);
                     fh->delete_record(rid, nullptr);
+                    lock_manager_->unlock(txn, LockDataId(fh->GetFd(), rid, LockDataType::RECORD));
                 }
             } else if (entry.rollback_restore_physical) {
                 bool restore_deleted = entry.restore_snapshot != nullptr && entry.restore_snapshot->is_deleted;
@@ -993,6 +1063,9 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
                     }
                 }
                 mvcc_versions_.erase(it);
+            }
+            if (write_record->GetWriteType() == WType::INSERT_TUPLE) {
+                UnregisterPhysicalInsert(tab_name, rid, txn);
             }
             delete write_record;
         }
@@ -1039,11 +1112,15 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
         RmFileHandle *fh = sm_manager_->fhs_.at(tab_name).get();
         Rid rid = write_record->GetRid();
 
-        switch (write_record->GetWriteType()) {
+            switch (write_record->GetWriteType()) {
             case WType::INSERT_TUPLE: {
-                auto rec = fh->get_record(rid, nullptr);
-                delete_index_entries(sm_manager_, tab_name, tab, *rec, txn);
-                fh->delete_record(rid, nullptr);
+                if (OwnsPhysicalInsert(tab_name, rid, txn)) {
+                    auto rec = fh->get_record(rid, nullptr);
+                    delete_index_entries(sm_manager_, tab_name, tab, *rec, txn);
+                    fh->delete_record(rid, nullptr);
+                    lock_manager_->unlock(txn, LockDataId(fh->GetFd(), rid, LockDataType::RECORD));
+                }
+                UnregisterPhysicalInsert(tab_name, rid, txn);
                 break;
             }
             case WType::DELETE_TUPLE: {

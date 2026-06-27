@@ -91,17 +91,17 @@ class IndexScanExecutor : public AbstractExecutor {
         if (use_2pl_locks()) {
             context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid, fh_->GetFd());
         }
-        std::unique_ptr<RmRecord> physical;
+        std::unique_ptr<RmRecord> rec;
         try {
-            physical = fh_->get_record(rid, context_);
+            if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+                rec = context_->txn_mgr_->GetVisibleRecord(
+                    tab_name_, rid, context_->txn_,
+                    [&]() { return fh_->get_record(rid, context_); });
+            } else {
+                rec = fh_->get_record(rid, context_);
+            }
         } catch (const RecordNotFoundError &) {
             return false;
-        }
-        std::unique_ptr<RmRecord> rec;
-        if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
-            rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, rid, *physical, context_->txn_);
-        } else {
-            rec = std::move(physical);
         }
         if (rec != nullptr && eval_conds(rec->data, cols_, fed_conds_)) {
             cur_rec_ = std::move(rec);

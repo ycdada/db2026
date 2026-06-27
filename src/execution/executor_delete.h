@@ -52,12 +52,6 @@ class DeleteExecutor : public AbstractExecutor {
         // 遍历 rids_，删除每条记录及其索引项
         for (auto &rid : rids_) {
             // 获取记录以用于删除索引
-            std::unique_ptr<RmRecord> physical;
-            try {
-                physical = fh_->get_record(rid, context_);
-            } catch (const RecordNotFoundError &) {
-                continue;
-            }
             bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                         context_->txn_mgr_->IsMvccTxn(context_->txn_);
             // RC 写者在有活跃 SI/SER 事务时也要保留旧版本并保留物理槽位（题目9 示例二）。
@@ -66,16 +60,29 @@ class DeleteExecutor : public AbstractExecutor {
             bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
                                  (context_->txn_mgr_ == nullptr ||
                                   !context_->txn_mgr_->IsMvccTxn(context_->txn_));
-            std::unique_ptr<RmRecord> rec;
-            if (mvcc) {
-                rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, rid, *physical, context_->txn_);
-                if (rec == nullptr) continue;
-                if (!eval_conds(rec->data, tab_.cols, conds_)) continue;
-            } else {
-                rec = std::move(physical);
-            }
             if (use_2pl_locks) {
                 context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid, fh_->GetFd());
+            }
+            std::unique_ptr<RmRecord> rec;
+            try {
+                if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+                    rec = context_->txn_mgr_->GetVisibleRecord(
+                        tab_name_, rid, context_->txn_,
+                        [&]() { return fh_->get_record(rid, context_); });
+                } else {
+                    rec = fh_->get_record(rid, context_);
+                }
+            } catch (const RecordNotFoundError &) {
+                continue;
+            }
+            if (mvcc) {
+                if (rec == nullptr) continue;
+                if (!eval_conds(rec->data, tab_.cols, conds_)) continue;
+            } else if (rec == nullptr) {
+                continue;
+            }
+            if (!eval_conds(rec->data, tab_.cols, conds_)) {
+                continue;
             }
             if (mvcc) {
                 context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *rec, context_->txn_);

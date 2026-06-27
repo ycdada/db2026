@@ -78,9 +78,12 @@ class InsertExecutor : public AbstractExecutor {
         } else {
             rid_ = fh_->insert_record(rec.data, context_);
         }
+        if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+            context_->txn_mgr_->RegisterPhysicalInsert(tab_name_, rid_, context_->txn_);
+        }
         bool write_record_appended = false;
         if (version_writes && context_->txn_ != nullptr) {
-            context_->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_));
+            context_->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, rec));
             write_record_appended = true;
         }
         // Insert into index
@@ -106,8 +109,13 @@ class InsertExecutor : public AbstractExecutor {
             for (auto &entry : inserted_index_entries) {
                 entry.first->delete_entry(entry.second.data(), context_ != nullptr ? context_->txn_ : nullptr);
             }
-            if (fh_->is_record(rid_)) {
+            bool owns_insert = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                               context_->txn_mgr_->OwnsPhysicalInsert(tab_name_, rid_, context_->txn_);
+            if (owns_insert && fh_->is_record(rid_)) {
                 fh_->delete_record(rid_, context_);
+            }
+            if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+                context_->txn_mgr_->UnregisterPhysicalInsert(tab_name_, rid_, context_->txn_);
             }
             if (version_writes && context_ != nullptr && context_->txn_mgr_ != nullptr && context_->txn_ != nullptr &&
                 context_->txn_->get_state() != TransactionState::COMMITTED &&
@@ -123,7 +131,7 @@ class InsertExecutor : public AbstractExecutor {
             context_->txn_->set_prev_lsn(lsn);
         }
         if (!write_record_appended && context_->txn_ != nullptr) {
-            context_->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_));
+            context_->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, rec));
         }
         return nullptr;
     }

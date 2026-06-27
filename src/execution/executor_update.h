@@ -52,12 +52,6 @@ class UpdateExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> Next() override {
         for (auto &rid : rids_) {
             // 获取当前记录
-            std::unique_ptr<RmRecord> physical_old_rec;
-            try {
-                physical_old_rec = fh_->get_record(rid, context_);
-            } catch (const RecordNotFoundError &) {
-                continue;
-            }
             bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                         context_->txn_mgr_->IsMvccTxn(context_->txn_);
             // RC 写者在有活跃 SI/SER 事务时也要保留旧版本（题目9 示例二）。
@@ -66,16 +60,29 @@ class UpdateExecutor : public AbstractExecutor {
             bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
                                  (context_->txn_mgr_ == nullptr ||
                                   !context_->txn_mgr_->IsMvccTxn(context_->txn_));
-            std::unique_ptr<RmRecord> old_rec;
-            if (mvcc) {
-                old_rec = context_->txn_mgr_->GetVisibleRecord(tab_name_, rid, *physical_old_rec, context_->txn_);
-                if (old_rec == nullptr) continue;
-                if (!eval_conds(old_rec->data, tab_.cols, conds_)) continue;
-            } else {
-                old_rec = std::move(physical_old_rec);
-            }
             if (use_2pl_locks) {
                 context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid, fh_->GetFd());
+            }
+            std::unique_ptr<RmRecord> old_rec;
+            try {
+                if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+                    old_rec = context_->txn_mgr_->GetVisibleRecord(
+                        tab_name_, rid, context_->txn_,
+                        [&]() { return fh_->get_record(rid, context_); });
+                } else {
+                    old_rec = fh_->get_record(rid, context_);
+                }
+            } catch (const RecordNotFoundError &) {
+                continue;
+            }
+            if (mvcc) {
+                if (old_rec == nullptr) continue;
+                if (!eval_conds(old_rec->data, tab_.cols, conds_)) continue;
+            } else if (old_rec == nullptr) {
+                continue;
+            }
+            if (!eval_conds(old_rec->data, tab_.cols, conds_)) {
+                continue;
             }
             auto new_rec = std::make_unique<RmRecord>(fh_->get_file_hdr().record_size, old_rec->data);
 
@@ -141,42 +148,47 @@ class UpdateExecutor : public AbstractExecutor {
                 context_->txn_->set_prev_lsn(lsn);
             }
 
+            struct ChangedIndexEntry {
+                IxIndexHandle *ih;
+                std::vector<char> old_key;
+                std::vector<char> new_key;
+            };
+            std::vector<ChangedIndexEntry> changed_index_entries;
             std::vector<std::pair<IxIndexHandle *, std::vector<char>>> deleted_old_index_entries;
             std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_new_index_entries;
             try {
-                // 更新前，删除旧索引项
                 for (size_t i = 0; i < tab_.indexes.size(); ++i) {
                     auto &index = tab_.indexes[i];
                     auto ih = sm_manager_->ihs_.at(
                         sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
                     std::vector<char> old_key(index.col_tot_len);
+                    std::vector<char> new_key(index.col_tot_len);
                     int offset = 0;
                     for (int j = 0; j < index.col_num; ++j) {
                         memcpy(old_key.data() + offset, old_rec->data + index.cols[j].offset, index.cols[j].len);
+                        memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
                         offset += index.cols[j].len;
                     }
-                    ih->delete_entry(old_key.data(), context_->txn_);
-                    deleted_old_index_entries.emplace_back(ih, std::move(old_key));
+                    if (old_key != new_key) {
+                        changed_index_entries.push_back({ih, std::move(old_key), std::move(new_key)});
+                    }
+                }
+
+                // 只维护键值实际变化的索引，避免非索引列更新期间短暂移除索引项。
+                for (auto &entry : changed_index_entries) {
+                    entry.ih->delete_entry(entry.old_key.data(), context_->txn_);
+                    deleted_old_index_entries.emplace_back(entry.ih, entry.old_key);
                 }
 
                 // 将更新后的记录写回
                 fh_->update_record(rid, new_rec->data, context_);
 
                 // 插入新的索引项
-                for (size_t i = 0; i < tab_.indexes.size(); ++i) {
-                    auto &index = tab_.indexes[i];
-                    auto ih = sm_manager_->ihs_.at(
-                        sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                    std::vector<char> new_key(index.col_tot_len);
-                    int offset = 0;
-                    for (int j = 0; j < index.col_num; ++j) {
-                        memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
-                        offset += index.cols[j].len;
-                    }
-                    if (ih->insert_entry(new_key.data(), rid, context_->txn_) == IX_NO_PAGE) {
+                for (auto &entry : changed_index_entries) {
+                    if (entry.ih->insert_entry(entry.new_key.data(), rid, context_->txn_) == IX_NO_PAGE) {
                         throw RMDBError("Duplicate key in unique index");
                     }
-                    inserted_new_index_entries.emplace_back(ih, std::move(new_key));
+                    inserted_new_index_entries.emplace_back(entry.ih, entry.new_key);
                 }
             } catch (TransactionAbortException &) {
                 throw;

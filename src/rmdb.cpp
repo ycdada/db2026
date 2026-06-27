@@ -227,9 +227,6 @@ void *client_handler(void *sock_fd) {
                     outfile.close();
                 }
             }
-            if (write(fd, data_send, offset + 1) == -1) {
-                break;
-            }
             if(context->txn_ != nullptr && context->txn_->get_txn_mode() == false &&
                context->txn_->get_state() != TransactionState::COMMITTED &&
                context->txn_->get_state() != TransactionState::ABORTED)
@@ -238,6 +235,9 @@ void *client_handler(void *sock_fd) {
                 txn_manager->release_transaction(context->txn_);
                 context->txn_ = nullptr;
                 txn_id = INVALID_TXN_ID;
+            }
+            if (write(fd, data_send, offset + 1) == -1) {
+                break;
             }
             continue;
         }
@@ -319,9 +319,6 @@ void *client_handler(void *sock_fd) {
         }
         // future TODO: 格式化 sql_handler.result, 传给客户端
         // send result with fixed format, use protobuf in the future
-        if (write(fd, data_send, offset + 1) == -1) {
-            break;
-        }
         // 如果是单挑语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务
         if(context->txn_ != nullptr && context->txn_->get_txn_mode() == false &&
            context->txn_->get_state() != TransactionState::COMMITTED &&
@@ -331,6 +328,9 @@ void *client_handler(void *sock_fd) {
             txn_manager->release_transaction(context->txn_);
             context->txn_ = nullptr;
             txn_id = INVALID_TXN_ID;
+        }
+        if (write(fd, data_send, offset + 1) == -1) {
+            break;
         }
     }
 
