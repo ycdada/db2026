@@ -9,6 +9,8 @@ Configure once with `cmake -S . -B build` and rebuild with `cmake --build build 
 ## Coding Style & Naming Conventions
 Use C++17 and keep changes consistent with the existing codebase: 4-space indentation, braces on the same line, and headers separated from implementation in `.h` and `.cpp` pairs. Types and classes use `PascalCase` (`TransactionManager`), functions use `snake_case` or existing project conventions, and constants/macros are uppercase (`BUFFER_POOL_SIZE`). Prefer small, localized changes over large rewrites, and avoid manually editing generated parser files such as `yacc.tab.cpp` or `lex.yy.cpp`.
 
+When fixing bugs, do not roll back or remove existing optimization code as the default solution. Preserve performance-oriented changes and repair the faulty behavior within that design unless the user explicitly asks to revert the optimization or confirms that reverting it is acceptable.
+
 ## Testing Guidelines
 Add or extend tests when touching storage, concurrency, parser, or recovery logic. Follow GoogleTest naming like `TEST(LRUReplacerTest, SampleTest)`. Keep test data isolated to repository-local directories and clean up files when practical. Before opening a PR, run `./build/bin/unit_test` and `cd build && ctest --output-on-failure`.
 
@@ -17,4 +19,3 @@ Recent history uses short, task-focused subjects, often tied to contest items (f
 
 ## Configuration & Generated Files
 Develop on Linux with GCC, CMake 3.16+, Flex, Bison, and `readline`, matching the repository README. Do not commit `build/` outputs or local database artifacts unless the task explicitly requires fixture updates.
-

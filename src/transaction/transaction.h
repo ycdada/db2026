@@ -136,6 +136,15 @@ class Transaction {
     inline void add_mvcc_write_key(const std::string &key) { mvcc_write_keys_.insert(key); }
     inline const std::set<std::string> &mvcc_write_keys() const { return mvcc_write_keys_; }
 
+    inline void ClearCompletedState() {
+        ClearWriteSet();
+        if (index_latch_page_set_ != nullptr) index_latch_page_set_->clear();
+        if (index_deleted_page_set_ != nullptr) index_deleted_page_set_->clear();
+        undo_logs_.clear();
+        mvcc_write_keys_.clear();
+        has_writes_ = false;
+    }
+
     /** 修改现有的撤销日志 */
     inline auto ModifyUndoLog(int log_idx, UndoLog new_log) {
         std::scoped_lock<std::mutex> lck(latch_);

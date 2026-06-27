@@ -208,19 +208,11 @@ void TransactionManager::release_transaction(Transaction *txn) {
     if (state != TransactionState::COMMITTED && state != TransactionState::ABORTED) {
         return;
     }
-    if (txn->is_mvcc() || !txn->mvcc_write_keys().empty()) {
-        return;
-    }
-    if (txn->get_txn_mode()) {
-        return;
-    }
-    if (txn->has_writes()) {
-        return;
-    }
-    if (!txn->get_write_set()->empty() || !txn->get_lock_set()->empty() ||
+    if (!txn->get_lock_set()->empty() ||
         !txn->get_index_latch_page_set()->empty() || !txn->get_index_deleted_page_set()->empty()) {
         return;
     }
+    txn->ClearCompletedState();
 
     std::unique_lock<std::mutex> lock(latch_);
     auto it = txn_map.find(txn->get_transaction_id());

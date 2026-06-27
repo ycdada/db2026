@@ -661,3 +661,204 @@ TEST(RecordManagerTest, SimpleTest) {
     rm_manager->close_file(file_handle.get());
     rm_manager->destroy_file(filename);
 }
+
+TEST(RecordManagerTest, RejectMissingRidMutation) {
+    auto disk_manager = std::make_unique<DiskManager>();
+    auto buffer_pool_manager = std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, disk_manager.get());
+    auto rm_manager = std::make_unique<RmManager>(disk_manager.get(), buffer_pool_manager.get());
+
+    std::string filename = "missing_rid.txt";
+    if (disk_manager->is_file(filename)) {
+        disk_manager->destroy_file(filename);
+    }
+    rm_manager->create_file(filename, sizeof(int));
+    auto file_handle = rm_manager->open_file(filename);
+
+    int value = 1;
+    Rid rid = file_handle->insert_record(reinterpret_cast<char *>(&value), nullptr);
+    file_handle->delete_record(rid, nullptr);
+
+    int new_value = 2;
+    EXPECT_THROW(file_handle->update_record(rid, reinterpret_cast<char *>(&new_value), nullptr),
+                 RecordNotFoundError);
+    EXPECT_THROW(file_handle->delete_record(rid, nullptr), RecordNotFoundError);
+    EXPECT_FALSE(file_handle->is_record(rid));
+
+    size_t scanned = 0;
+    for (RmScan scan(file_handle.get()); !scan.is_end(); scan.next()) {
+        scanned++;
+    }
+    EXPECT_EQ(scanned, 0);
+
+    rm_manager->close_file(file_handle.get());
+    rm_manager->destroy_file(filename);
+}
+
+TEST(RecordManagerTest, FixedRidInsertKeepsFreeListHead) {
+    auto disk_manager = std::make_unique<DiskManager>();
+    auto buffer_pool_manager = std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, disk_manager.get());
+    auto rm_manager = std::make_unique<RmManager>(disk_manager.get(), buffer_pool_manager.get());
+
+    std::string filename = "fixed_rid_free_list.txt";
+    if (disk_manager->is_file(filename)) {
+        disk_manager->destroy_file(filename);
+    }
+    rm_manager->create_file(filename, RM_MAX_RECORD_SIZE);
+    auto file_handle = rm_manager->open_file(filename);
+
+    std::vector<char> buf(file_handle->file_hdr_.record_size, 1);
+    int per_page = file_handle->file_hdr_.num_records_per_page;
+    std::vector<Rid> rids;
+    for (int i = 0; i < per_page * 3; ++i) {
+        rids.push_back(file_handle->insert_record(buf.data(), nullptr));
+    }
+
+    Rid page1_gap = rids[0];
+    Rid page2_gap = rids[per_page];
+    file_handle->delete_record(page1_gap, nullptr);
+    file_handle->delete_record(page2_gap, nullptr);
+    ASSERT_EQ(file_handle->file_hdr_.first_free_page_no, page2_gap.page_no);
+
+    file_handle->insert_record(page1_gap, buf.data());
+    EXPECT_EQ(file_handle->file_hdr_.first_free_page_no, page2_gap.page_no);
+
+    Rid normal_insert = file_handle->insert_record(buf.data(), nullptr);
+    EXPECT_EQ(normal_insert.page_no, page2_gap.page_no);
+    EXPECT_EQ(normal_insert.slot_no, page2_gap.slot_no);
+
+    rm_manager->close_file(file_handle.get());
+    rm_manager->destroy_file(filename);
+}
+
+TEST(RecordManagerTest, MultipleHandlesShareRecordCache) {
+    auto disk_manager = std::make_unique<DiskManager>();
+    auto buffer_pool_manager = std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, disk_manager.get());
+    auto rm_manager = std::make_unique<RmManager>(disk_manager.get(), buffer_pool_manager.get());
+
+    std::string filename = "shared_record_cache.txt";
+    if (disk_manager->is_file(filename)) {
+        disk_manager->destroy_file(filename);
+    }
+    rm_manager->create_file(filename, sizeof(int));
+    auto first_handle = rm_manager->open_file(filename);
+    auto second_handle = rm_manager->open_file(filename);
+
+    int value = 1;
+    Rid rid = first_handle->insert_record(reinterpret_cast<char *>(&value), nullptr);
+    EXPECT_TRUE(second_handle->is_record(rid));
+    auto rec = second_handle->get_record(rid, nullptr);
+    EXPECT_EQ(*reinterpret_cast<int *>(rec->data), value);
+
+    int updated_value = 2;
+    second_handle->update_record(rid, reinterpret_cast<char *>(&updated_value), nullptr);
+    rec = first_handle->get_record(rid, nullptr);
+    EXPECT_EQ(*reinterpret_cast<int *>(rec->data), updated_value);
+
+    size_t scanned = 0;
+    for (RmScan scan(first_handle.get()); !scan.is_end(); scan.next()) {
+        scanned++;
+    }
+    EXPECT_EQ(scanned, 1);
+
+    second_handle->delete_record(rid, nullptr);
+    EXPECT_FALSE(first_handle->is_record(rid));
+
+    scanned = 0;
+    for (RmScan scan(first_handle.get()); !scan.is_end(); scan.next()) {
+        scanned++;
+    }
+    EXPECT_EQ(scanned, 0);
+
+    rm_manager->close_file(first_handle.get());
+    rm_manager->close_file(second_handle.get());
+    second_handle.reset();
+    first_handle.reset();
+    rm_manager->destroy_file(filename);
+}
+
+TEST(RecordManagerTest, ClosingOneHandleKeepsOtherHandleCache) {
+    auto disk_manager = std::make_unique<DiskManager>();
+    auto buffer_pool_manager = std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, disk_manager.get());
+    auto rm_manager = std::make_unique<RmManager>(disk_manager.get(), buffer_pool_manager.get());
+
+    std::string filename = "close_one_shared_record_cache.txt";
+    if (disk_manager->is_file(filename)) {
+        disk_manager->destroy_file(filename);
+    }
+    rm_manager->create_file(filename, sizeof(int));
+    auto first_handle = rm_manager->open_file(filename);
+    auto second_handle = rm_manager->open_file(filename);
+
+    int value = 42;
+    Rid rid = first_handle->insert_record(reinterpret_cast<char *>(&value), nullptr);
+    ASSERT_TRUE(second_handle->is_record(rid));
+
+    rm_manager->close_file(first_handle.get());
+
+    EXPECT_THROW(first_handle->GetFd(), RMDBError);
+    EXPECT_THROW(first_handle->get_record(rid, nullptr), RMDBError);
+    EXPECT_THROW(first_handle->insert_record(reinterpret_cast<char *>(&value), nullptr), RMDBError);
+    EXPECT_THROW(first_handle->update_record(rid, reinterpret_cast<char *>(&value), nullptr), RMDBError);
+    EXPECT_THROW(first_handle->delete_record(rid, nullptr), RMDBError);
+    EXPECT_THROW({
+        RmScan scan(first_handle.get());
+        (void)scan;
+    }, RMDBError);
+
+    EXPECT_TRUE(second_handle->is_record(rid));
+    auto rec = second_handle->get_record(rid, nullptr);
+    EXPECT_EQ(*reinterpret_cast<int *>(rec->data), value);
+
+    auto third_handle = rm_manager->open_file(filename);
+    EXPECT_TRUE(third_handle->is_record(rid));
+
+    int updated_value = 84;
+    second_handle->update_record(rid, reinterpret_cast<char *>(&updated_value), nullptr);
+    rec = third_handle->get_record(rid, nullptr);
+    EXPECT_EQ(*reinterpret_cast<int *>(rec->data), updated_value);
+
+    size_t scanned = 0;
+    for (RmScan scan(second_handle.get()); !scan.is_end(); scan.next()) {
+        scanned++;
+    }
+    EXPECT_EQ(scanned, 1);
+
+    rm_manager->close_file(second_handle.get());
+    rm_manager->close_file(third_handle.get());
+    third_handle.reset();
+    first_handle.reset();
+    second_handle.reset();
+    rm_manager->destroy_file(filename);
+}
+
+TEST(RecordManagerTest, ReopenRecreatedFileDoesNotReuseClosedCache) {
+    auto disk_manager = std::make_unique<DiskManager>();
+    auto buffer_pool_manager = std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, disk_manager.get());
+    auto rm_manager = std::make_unique<RmManager>(disk_manager.get(), buffer_pool_manager.get());
+
+    std::string filename = "recreated_record_cache.txt";
+    if (disk_manager->is_file(filename)) {
+        disk_manager->destroy_file(filename);
+    }
+    rm_manager->create_file(filename, sizeof(int));
+    auto old_handle = rm_manager->open_file(filename);
+
+    int value = 7;
+    Rid old_rid = old_handle->insert_record(reinterpret_cast<char *>(&value), nullptr);
+    ASSERT_TRUE(old_handle->is_record(old_rid));
+
+    rm_manager->close_file(old_handle.get());
+    rm_manager->destroy_file(filename);
+
+    rm_manager->create_file(filename, sizeof(int) * 2);
+    auto new_handle = rm_manager->open_file(filename);
+
+    EXPECT_EQ(new_handle->get_file_hdr().record_size, static_cast<int>(sizeof(int) * 2));
+    EXPECT_FALSE(new_handle->is_record(old_rid));
+    EXPECT_THROW(new_handle->get_record(old_rid, nullptr), RecordNotFoundError);
+
+    rm_manager->close_file(new_handle.get());
+    new_handle.reset();
+    old_handle.reset();
+    rm_manager->destroy_file(filename);
+}

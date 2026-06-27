@@ -14,7 +14,9 @@ See the Mulan PSL v2 for more details. */
 
 #include <algorithm>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -55,35 +57,66 @@ class RmFileHandle {
     int fd_;        // 打开文件后产生的文件句柄
     RmFileHdr file_hdr_;    // 文件头，维护当前表文件的元数据
     mutable std::shared_mutex latch_;
-    std::unordered_map<int64_t, std::unique_ptr<RmRecord>> memory_records_;
+    std::string file_name_;
+    mutable bool closed_ = false;
+
+    struct SharedRecordState {
+        mutable std::shared_mutex latch;
+        RmFileHdr file_hdr{};
+        bool header_loaded = false;
+        bool records_loaded = false;
+        size_t active_handles = 0;
+        std::unordered_map<int64_t, std::unique_ptr<RmRecord>> records;
+    };
+
+    std::shared_ptr<SharedRecordState> shared_state_;
+    static std::mutex shared_states_latch_;
+    static std::unordered_map<std::string, std::weak_ptr<SharedRecordState>> shared_states_;
 
    public:
     RmFileHandle(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, int fd)
-        : disk_manager_(disk_manager), buffer_pool_manager_(buffer_pool_manager), fd_(fd) {
+        : disk_manager_(disk_manager), buffer_pool_manager_(buffer_pool_manager), fd_(fd),
+          file_name_(disk_manager_->get_file_name(fd)), shared_state_(get_shared_state(file_name_)) {
         // 注意：这里从磁盘中读出文件描述符为fd的文件的file_hdr，读到内存中
         // 这里实际就是初始化file_hdr，只不过是从磁盘中读出进行初始化
         // init file_hdr_
-        disk_manager_->read_page(fd, RM_FILE_HDR_PAGE, (char *)&file_hdr_, sizeof(file_hdr_));
+        RmFileHdr disk_file_hdr{};
+        disk_manager_->read_page(fd, RM_FILE_HDR_PAGE, (char *)&disk_file_hdr, sizeof(disk_file_hdr));
+        {
+            std::unique_lock<std::shared_mutex> guard(shared_state_->latch);
+            if (!shared_state_->header_loaded) {
+                shared_state_->file_hdr = disk_file_hdr;
+                shared_state_->header_loaded = true;
+            }
+            file_hdr_ = shared_state_->file_hdr;
+            shared_state_->active_handles++;
+        }
         // disk_manager管理的fd对应的文件中，设置从file_hdr_.num_pages开始分配page_no
         disk_manager_->set_fd2pageno(fd, file_hdr_.num_pages);
         load_memory_records();
     }
 
-    RmFileHdr get_file_hdr() {
-        std::shared_lock<std::shared_mutex> guard(latch_);
-        return file_hdr_;
+    RmFileHdr get_file_hdr() const {
+        std::shared_lock<std::shared_mutex> handle_guard(latch_);
+        ensure_open_locked();
+        std::shared_lock<std::shared_mutex> guard(shared_state_->latch);
+        return shared_state_->file_hdr;
     }
-    int GetFd() { return fd_; }
+    int GetFd() {
+        std::shared_lock<std::shared_mutex> handle_guard(latch_);
+        ensure_open_locked();
+        return fd_;
+    }
     void flush_file_hdr() {
-        std::shared_lock<std::shared_mutex> guard(latch_);
-        disk_manager_->write_page(fd_, RM_FILE_HDR_PAGE, (char *)&file_hdr_, sizeof(file_hdr_));
+        std::shared_lock<std::shared_mutex> handle_guard(latch_);
+        ensure_open_locked();
+        std::shared_lock<std::shared_mutex> guard(shared_state_->latch);
+        disk_manager_->write_page(fd_, RM_FILE_HDR_PAGE, (char *)&shared_state_->file_hdr,
+                                  sizeof(shared_state_->file_hdr));
     }
 
     /* 判断指定位置上是否已经存在一条记录，通过Bitmap来判断 */
-    bool is_record(const Rid &rid) const {
-        std::shared_lock<std::shared_mutex> guard(latch_);
-        return memory_records_.find(memory_key(rid)) != memory_records_.end();
-    }
+    bool is_record(const Rid &rid) const;
 
     std::unique_ptr<RmRecord> get_record(const Rid &rid, Context *context) const;
 
@@ -106,13 +139,29 @@ class RmFileHandle {
     RmPageHandle fetch_page_handle(int page_no) const;
 
    private:
+    static std::shared_ptr<SharedRecordState> get_shared_state(const std::string &file_name);
+
+    void detach_shared_state() const;
+
+    void ensure_open_locked() const {
+        if (closed_) {
+            throw RMDBError("Record file handle is closed: " + file_name_);
+        }
+    }
+
     RmPageHandle create_new_page_handle_unlocked();
+
+    RmPageHandle fetch_page_handle_unlocked(int page_no) const;
 
     RmPageHandle create_page_handle();
 
     void release_page_handle(RmPageHandle &page_handle);
 
     void load_memory_records();
+
+    void remove_page_from_free_list(RmPageHandle &page_handle);
+
+    bool record_exists_on_page(const Rid &rid, const RmPageHandle &page_handle) const;
 
     static int64_t memory_key(const Rid &rid) {
         return (static_cast<int64_t>(rid.page_no) << 32) | static_cast<uint32_t>(rid.slot_no);

@@ -266,15 +266,12 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
 
     TabMeta &tab = db_.get_table(tab_name);
     RmFileHandle *fh = fhs_.at(tab_name).get();
-    std::vector<std::unique_ptr<RmRecord>> records;
-    std::string line;
-    bool first_data_line = true;
-    while (std::getline(ifs, line)) {
+    auto parse_record = [&](std::string line, bool &first_data_line) -> std::unique_ptr<RmRecord> {
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
         if (line.empty()) {
-            continue;
+            return nullptr;
         }
         auto fields = split_csv_line(line);
         if (fields.size() != tab.cols.size()) {
@@ -282,7 +279,7 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
         }
         if (first_data_line && is_csv_header(fields, tab)) {
             first_data_line = false;
-            continue;
+            return nullptr;
         }
         first_data_line = false;
 
@@ -305,19 +302,11 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
                 memcpy(dst, field.data(), field.size());
             }
         }
-        records.push_back(std::move(rec));
-    }
+        return rec;
+    };
 
-    if (!tab.indexes.empty()) {
-        const IndexMeta &clustered_index = tab.indexes.front();
-        std::sort(records.begin(), records.end(), [&](const auto &lhs, const auto &rhs) {
-            return record_less_by_index(lhs, rhs, clustered_index);
-        });
-    }
-
-    fh->reserve_memory_records(records.size());
-    for (auto &rec : records) {
-        Rid rid = fh->insert_record(rec->data, context);
+    auto insert_loaded_record = [&](RmRecord &rec) {
+        Rid rid = fh->insert_record(rec.data, context);
         std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_index_entries;
         try {
             for (auto &index : tab.indexes) {
@@ -325,7 +314,7 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
                 std::vector<char> key(index.col_tot_len);
                 int offset = 0;
                 for (int i = 0; i < index.col_num; ++i) {
-                    memcpy(key.data() + offset, rec->data + index.cols[i].offset, index.cols[i].len);
+                    memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
                     offset += index.cols[i].len;
                 }
                 if (ih->insert_entry(key.data(), rid, context ? context->txn_ : nullptr) == IX_NO_PAGE) {
@@ -344,11 +333,53 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
             context->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name, rid));
         }
         if (context != nullptr && context->txn_ != nullptr && context->log_mgr_ != nullptr) {
-            InsertLogRecord log(context->txn_->get_transaction_id(), *rec, rid, tab_name);
+            InsertLogRecord log(context->txn_->get_transaction_id(), rec, rid, tab_name);
             log.prev_lsn_ = context->txn_->get_prev_lsn();
             lsn_t lsn = context->log_mgr_->add_log_record(&log);
             context->txn_->set_prev_lsn(lsn);
         }
+    };
+
+    std::string line;
+    bool first_data_line = true;
+    if (tab.indexes.empty()) {
+        size_t record_count = 0;
+        while (std::getline(ifs, line)) {
+            auto rec = parse_record(line, first_data_line);
+            if (rec != nullptr) {
+                record_count++;
+            }
+        }
+        fh->reserve_memory_records(record_count);
+
+        ifs.clear();
+        ifs.seekg(0);
+        first_data_line = true;
+        while (std::getline(ifs, line)) {
+            auto rec = parse_record(line, first_data_line);
+            if (rec != nullptr) {
+                insert_loaded_record(*rec);
+            }
+        }
+        return;
+    }
+
+    std::vector<std::unique_ptr<RmRecord>> records;
+    while (std::getline(ifs, line)) {
+        auto rec = parse_record(line, first_data_line);
+        if (rec != nullptr) {
+            records.push_back(std::move(rec));
+        }
+    }
+    fh->reserve_memory_records(records.size());
+
+    const IndexMeta &clustered_index = tab.indexes.front();
+    std::sort(records.begin(), records.end(), [&](const auto &lhs, const auto &rhs) {
+        return record_less_by_index(lhs, rhs, clustered_index);
+    });
+
+    for (auto &rec : records) {
+        insert_loaded_record(*rec);
     }
 }
 

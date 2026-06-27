@@ -75,10 +75,31 @@ class RmManager {
      * @param {RmFileHandle*} file_handle 要关闭文件的句柄
      */
     void close_file(const RmFileHandle* file_handle) {
-        disk_manager_->write_page(file_handle->fd_, RM_FILE_HDR_PAGE, (char *)&file_handle->file_hdr_,
-                                  sizeof(file_handle->file_hdr_));
+        RmFileHdr file_hdr{};
+        bool last_handle = false;
+        {
+            std::unique_lock<std::shared_mutex> handle_guard(file_handle->latch_);
+            if (file_handle->closed_) {
+                return;
+            }
+            std::unique_lock<std::shared_mutex> guard(file_handle->shared_state_->latch);
+            file_hdr = file_handle->shared_state_->file_hdr;
+            if (file_handle->file_hdr_.num_pages > file_hdr.num_pages) {
+                file_hdr = file_handle->file_hdr_;
+                file_handle->shared_state_->file_hdr = file_hdr;
+            }
+            if (file_handle->shared_state_->active_handles > 0) {
+                file_handle->shared_state_->active_handles--;
+            }
+            last_handle = file_handle->shared_state_->active_handles == 0;
+            file_handle->closed_ = true;
+        }
+        disk_manager_->write_page(file_handle->fd_, RM_FILE_HDR_PAGE, (char *)&file_hdr, sizeof(file_hdr));
         // 缓冲区的所有页刷到磁盘，注意这句话必须写在close_file前面
         buffer_pool_manager_->flush_all_pages(file_handle->fd_);
-        disk_manager_->close_file(file_handle->fd_);
+        if (last_handle) {
+            disk_manager_->close_file(file_handle->fd_);
+            file_handle->detach_shared_state();
+        }
     }
 };

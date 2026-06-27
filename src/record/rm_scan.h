@@ -21,6 +21,7 @@ class RmScan : public RecScan {
     std::vector<Rid> rids_;
     size_t pos_ = 0;
     Rid rid_;
+
 public:
     RmScan(const RmFileHandle *file_handle);
 
