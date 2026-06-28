@@ -587,7 +587,7 @@ void TransactionManager::PrepareWriteLocked(const std::string &tab_name, const R
         }
     }
 
-    if (txn->mvcc_write_keys().count(key) == 0) {
+    if (txn->add_mvcc_write_key(key)) {
         entry.had_entry_on_abort = had_entry;
         if (had_entry) {
             MvccEntry snapshot = entry;
@@ -605,7 +605,6 @@ void TransactionManager::PrepareWriteLocked(const std::string &tab_name, const R
             entry.rollback_record = old_rec;
             entry.undo_versions.emplace_back(old_rec, entry.is_deleted, entry.commit_ts, entry.writer_txn);
         }
-        txn->add_mvcc_write_key(key);
     }
 }
 
@@ -1066,6 +1065,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
         bool has_writes = !records.empty() || !txn->mvcc_write_keys().empty();
 
         std::unordered_set<std::string> processed_keys;
+        processed_keys.reserve(records.size());
         for (auto *write_record : records) {
             const std::string &tab_name = write_record->GetTableName();
             TabMeta &tab = sm_manager_->db_.get_table(tab_name);

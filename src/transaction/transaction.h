@@ -14,7 +14,6 @@ See the Mulan PSL v2 for more details. */
 #include <deque>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -68,6 +67,7 @@ class Transaction {
         index_deleted_page_set_ = std::make_shared<std::deque<Page*>>();
         prev_lsn_ = INVALID_LSN;
         thread_id_ = std::this_thread::get_id();
+        mvcc_write_keys_.reserve(16);
     }
 
     ~Transaction() { ClearWriteSet(); }
@@ -136,8 +136,8 @@ class Transaction {
     inline void set_read_ts(timestamp_t read_ts) { read_ts_ = read_ts; }
     inline void set_commit_ts(timestamp_t commit_ts) { commit_ts_ = commit_ts; }
 
-    inline void add_mvcc_write_key(const std::string &key) { mvcc_write_keys_.insert(key); }
-    inline const std::set<std::string> &mvcc_write_keys() const { return mvcc_write_keys_; }
+    inline bool add_mvcc_write_key(const std::string &key) { return mvcc_write_keys_.insert(key).second; }
+    inline const std::unordered_set<std::string> &mvcc_write_keys() const { return mvcc_write_keys_; }
 
     inline void ClearCompletedState() {
         ClearWriteSet();
@@ -199,7 +199,7 @@ class Transaction {
   std::vector<UndoLog> undo_logs_;
   /** 用于访问事务级撤销日志的锁。 */
   std::mutex latch_;
-  std::set<std::string> mvcc_write_keys_;
+  std::unordered_set<std::string> mvcc_write_keys_;
 
     void ClearWriteSet() {
         if (write_set_ == nullptr) {
