@@ -217,8 +217,7 @@ void TransactionManager::release_transaction(Transaction *txn) {
         !txn->get_index_latch_page_set()->empty() || !txn->get_index_deleted_page_set()->empty()) {
         return;
     }
-    bool can_reuse = !txn->get_txn_mode() && !txn->is_mvcc() && !txn->has_writes() &&
-                     txn->get_write_set()->empty() && txn->mvcc_write_keys().empty();
+    bool can_reuse = !txn->get_txn_mode() && txn->get_write_set()->empty();
 
     if (!txn->is_tracked_in_map() && !can_reuse) {
         delete txn;
