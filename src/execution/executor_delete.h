@@ -56,16 +56,16 @@ class DeleteExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         // 遍历 rids_，删除每条记录及其索引项
-        bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                    context_->txn_mgr_->IsMvccTxn(context_->txn_);
-        // RC 写者在有活跃 SI/SER 事务时也要保留旧版本并保留物理槽位（题目9 示例二）。
-        bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                              context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
-        bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
-                             (context_->txn_mgr_ == nullptr ||
-                              !context_->txn_mgr_->IsMvccTxn(context_->txn_));
         for (auto &rid : rids_) {
             // 获取记录以用于删除索引
+            bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
+            // RC 写者在有活跃 SI/SER 事务时也要保留旧版本并保留物理槽位（题目9 示例二）。
+            bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                                  context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
+            bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
+                                 (context_->txn_mgr_ == nullptr ||
+                                  !context_->txn_mgr_->IsMvccTxn(context_->txn_));
             if (use_2pl_locks) {
                 context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid, fh_->GetFd());
             }

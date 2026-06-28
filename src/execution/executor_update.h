@@ -84,16 +84,16 @@ class UpdateExecutor : public AbstractExecutor {
         }
     }
     std::unique_ptr<RmRecord> Next() override {
-        bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                    context_->txn_mgr_->IsMvccTxn(context_->txn_);
-        // RC 写者在有活跃 SI/SER 事务时也要保留旧版本（题目9 示例二）。
-        bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                              context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
-        bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
-                             (context_->txn_mgr_ == nullptr ||
-                              !context_->txn_mgr_->IsMvccTxn(context_->txn_));
         for (auto &rid : rids_) {
             // 获取当前记录
+            bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
+            // RC 写者在有活跃 SI/SER 事务时也要保留旧版本（题目9 示例二）。
+            bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                                  context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
+            bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
+                                 (context_->txn_mgr_ == nullptr ||
+                                  !context_->txn_mgr_->IsMvccTxn(context_->txn_));
             if (use_2pl_locks) {
                 context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid, fh_->GetFd());
             }

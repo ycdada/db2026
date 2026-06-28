@@ -116,10 +116,8 @@ class InsertExecutor : public AbstractExecutor {
                 if (ih->insert_entry(key_buf.data(), rid_, context_->txn_) == IX_NO_PAGE) {
                     throw RMDBError("Duplicate key in unique index");
                 }
-                if (idx + 1 < tab_->indexes.size()) {
-                    inserted_index_entries.emplace_back(
-                        ih, std::vector<char>(key_buf.data(), key_buf.data() + index.col_tot_len));
-                }
+                inserted_index_entries.emplace_back(
+                    ih, std::vector<char>(key_buf.data(), key_buf.data() + index.col_tot_len));
             }
         } catch (...) {
             for (auto &entry : inserted_index_entries) {
