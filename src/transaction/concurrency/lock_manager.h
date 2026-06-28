@@ -12,7 +12,7 @@ See the Mulan PSL v2 for more details. */
 
 #include <array>
 #include <mutex>
-#include <condition_variable>
+#include <vector>
 #include "transaction/transaction.h"
 
 static const std::string GroupLockModeStr[10] = {"NON_LOCK", "IS", "IX", "S", "X", "SIX"};
@@ -38,8 +38,9 @@ class LockManager {
     /* 数据项上的加锁队列 */
     class LockRequestQueue {
     public:
-        std::list<LockRequest> request_queue_;  // 加锁队列
-        std::condition_variable cv_;            // 条件变量，用于唤醒正在等待加锁的申请，在no-wait策略下无需使用
+        LockRequestQueue() { request_queue_.reserve(2); }
+
+        std::vector<LockRequest> request_queue_;  // 加锁队列
         GroupLockMode group_lock_mode_ = GroupLockMode::NON_LOCK;   // 加锁队列的锁模式
     };
 

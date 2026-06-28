@@ -24,7 +24,24 @@ See the Mulan PSL v2 for more details. */
 #include "record/rm_scan.h"
 #include "record_printer.h"
 
-bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string>& index_col_names) {
+namespace {
+
+CompOp swap_comp_op(CompOp op) {
+    switch (op) {
+        case OP_EQ: return OP_EQ;
+        case OP_NE: return OP_NE;
+        case OP_LT: return OP_GT;
+        case OP_GT: return OP_LT;
+        case OP_LE: return OP_GE;
+        case OP_GE: return OP_LE;
+    }
+    return op;
+}
+
+}
+
+bool Planner::get_index_cols(const std::string &tab_name, const std::vector<Condition> &curr_conds,
+                             std::vector<std::string> &index_col_names) {
     index_col_names.clear();
     TabMeta& tab = sm_manager_->db_.get_table(tab_name);
     std::unordered_map<std::string, std::vector<const Condition *>> cond_by_col;
@@ -145,11 +162,8 @@ int push_conds(Condition *cond, std::shared_ptr<Plan> plan)
         // 左子节点匹配到条件的右边
         if(left_res == 2) {
             // 需要将左右两边的条件变换位置
-            std::map<CompOp, CompOp> swap_op = {
-                {OP_EQ, OP_EQ}, {OP_NE, OP_NE}, {OP_LT, OP_GT}, {OP_GT, OP_LT}, {OP_LE, OP_GE}, {OP_GE, OP_LE},
-            };
             std::swap(cond->lhs_col, cond->rhs_col);
-            cond->op = swap_op.at(cond->op);
+            cond->op = swap_comp_op(cond->op);
         }
         x->conds_.emplace_back(std::move(*cond));
         return 3;

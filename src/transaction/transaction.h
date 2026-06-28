@@ -78,6 +78,7 @@ class Transaction {
         isolation_level_ = isolation_level;
         mvcc_enabled_ = false;
         has_writes_ = false;
+        tracked_in_map_ = true;
         thread_id_ = std::this_thread::get_id();
         prev_lsn_ = INVALID_LSN;
         txn_id_ = txn_id;
@@ -104,8 +105,10 @@ class Transaction {
     inline timestamp_t get_start_ts() { return start_ts_; }
 
 	    inline IsolationLevel get_isolation_level() { return isolation_level_; }
-	    inline void set_mvcc_enabled(bool mvcc_enabled) { mvcc_enabled_ = mvcc_enabled; }
-	    inline bool is_mvcc() const { return mvcc_enabled_; }
+    inline void set_mvcc_enabled(bool mvcc_enabled) { mvcc_enabled_ = mvcc_enabled; }
+    inline bool is_mvcc() const { return mvcc_enabled_; }
+    inline void set_tracked_in_map(bool tracked) { tracked_in_map_ = tracked; }
+    inline bool is_tracked_in_map() const { return tracked_in_map_; }
 
     inline TransactionState get_state() { return state_; }
     inline void set_state(TransactionState state) { state_ = state; }
@@ -113,20 +116,20 @@ class Transaction {
     inline lsn_t get_prev_lsn() { return prev_lsn_; }
     inline void set_prev_lsn(lsn_t prev_lsn) { prev_lsn_ = prev_lsn; }
 
-    inline std::shared_ptr<std::deque<WriteRecord *>> get_write_set() { return write_set_; }
+    inline std::deque<WriteRecord *> *get_write_set() { return write_set_.get(); }
     inline void append_write_record(WriteRecord* write_record) {
         has_writes_ = true;
         write_set_->push_back(write_record);
     }
     inline bool has_writes() const { return has_writes_; }
 
-    inline std::shared_ptr<std::deque<Page*>> get_index_deleted_page_set() { return index_deleted_page_set_; }
+    inline std::deque<Page *> *get_index_deleted_page_set() { return index_deleted_page_set_.get(); }
     inline void append_index_deleted_page(Page* page) { index_deleted_page_set_->push_back(page); }
 
-    inline std::shared_ptr<std::deque<Page*>> get_index_latch_page_set() { return index_latch_page_set_; }
+    inline std::deque<Page *> *get_index_latch_page_set() { return index_latch_page_set_.get(); }
     inline void append_index_latch_page_set(Page* page) { index_latch_page_set_->push_back(page); }
 
-    inline std::shared_ptr<std::unordered_set<LockDataId>> get_lock_set() { return lock_set_; }
+    inline std::unordered_set<LockDataId> *get_lock_set() { return lock_set_.get(); }
 
     inline timestamp_t get_read_ts() const { return read_ts_; }
     inline timestamp_t get_commit_ts() const { return commit_ts_; }
@@ -175,6 +178,7 @@ class Transaction {
 	    IsolationLevel isolation_level_;  // 事务的隔离级别，默认隔离级别为可串行化
 	    bool mvcc_enabled_ = false;
     bool has_writes_ = false;
+    bool tracked_in_map_ = true;
     std::thread::id thread_id_;       // 当前事务对应的线程id
     lsn_t prev_lsn_;                  // 当前事务执行的最后一条操作对应的lsn，用于系统故障恢复
     txn_id_t txn_id_;                 // 事务的ID，唯一标识符

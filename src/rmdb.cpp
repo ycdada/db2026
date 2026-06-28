@@ -15,10 +15,10 @@ See the Mulan PSL v2 for more details. */
 #include <signal.h>
 #include <unistd.h>
 #include <atomic>
-#include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <memory>
-#include <sstream>
+#include <string_view>
 #include "errors.h"
 #include "optimizer/optimizer.h"
 #include "recovery/log_recovery.h"
@@ -80,7 +80,7 @@ static void EnsureStatementTransaction(txn_id_t *txn_id, Context *context,
     context->txn_ = txn_manager->get_transaction(*txn_id);
     if (context->txn_ == nullptr || context->txn_->get_state() == TransactionState::COMMITTED ||
         context->txn_->get_state() == TransactionState::ABORTED) {
-        context->txn_ = txn_manager->begin(nullptr, context->log_mgr_, session_isolation_level);
+        context->txn_ = txn_manager->begin(nullptr, context->log_mgr_, session_isolation_level, false);
         *txn_id = context->txn_->get_transaction_id();
         context->txn_->set_txn_mode(false);
     }
@@ -111,38 +111,71 @@ static void AbortTransactionById(txn_id_t *txn_id) {
     *txn_id = INVALID_TXN_ID;
 }
 
-static std::string trim_command(std::string s) {
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
-        s.erase(s.begin());
+static std::string_view trim_command_view(const char *data, size_t len) {
+    size_t begin = 0;
+    while (begin < len && std::isspace(static_cast<unsigned char>(data[begin]))) {
+        ++begin;
     }
-    while (!s.empty() && (std::isspace(static_cast<unsigned char>(s.back())) || s.back() == '\0')) {
-        s.pop_back();
+    while (len > begin &&
+           (std::isspace(static_cast<unsigned char>(data[len - 1])) || data[len - 1] == '\0')) {
+        --len;
     }
-    return s;
+    return std::string_view(data + begin, len - begin);
 }
 
-static std::string lower_command(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
+static bool iequals(std::string_view lhs, const char *rhs) {
+    const size_t rhs_len = std::strlen(rhs);
+    if (lhs.size() != rhs_len) {
+        return false;
+    }
+    for (size_t i = 0; i < rhs_len; ++i) {
+        if (std::tolower(static_cast<unsigned char>(lhs[i])) !=
+            std::tolower(static_cast<unsigned char>(rhs[i]))) {
+            return false;
+        }
+    }
+    return true;
 }
 
-static bool parse_load_command(const std::string &cmd, std::string &file_name, std::string &tab_name) {
-    std::string s = trim_command(cmd);
-    if (!s.empty() && s.back() == ';') {
-        s.pop_back();
+static bool next_token(std::string_view s, size_t *pos, std::string_view *token) {
+    while (*pos < s.size() && std::isspace(static_cast<unsigned char>(s[*pos]))) {
+        ++(*pos);
     }
-    std::istringstream iss(s);
-    std::string load_kw;
-    std::string into_kw;
-    if (!(iss >> load_kw >> file_name >> into_kw >> tab_name)) {
+    if (*pos >= s.size()) {
         return false;
     }
-    std::string extra;
-    if (iss >> extra) {
+    const size_t begin = *pos;
+    while (*pos < s.size() && !std::isspace(static_cast<unsigned char>(s[*pos]))) {
+        ++(*pos);
+    }
+    *token = s.substr(begin, *pos - begin);
+    return true;
+}
+
+static bool parse_load_command(std::string_view cmd, std::string &file_name, std::string &tab_name) {
+    if (!cmd.empty() && cmd.back() == ';') {
+        cmd.remove_suffix(1);
+    }
+
+    size_t pos = 0;
+    std::string_view load_kw;
+    std::string_view file_token;
+    std::string_view into_kw;
+    std::string_view table_token;
+    std::string_view extra;
+    if (!next_token(cmd, &pos, &load_kw) ||
+        !next_token(cmd, &pos, &file_token) ||
+        !next_token(cmd, &pos, &into_kw) ||
+        !next_token(cmd, &pos, &table_token) ||
+        next_token(cmd, &pos, &extra)) {
         return false;
     }
-    return lower_command(load_kw) == "load" && lower_command(into_kw) == "into";
+    if (!iequals(load_kw, "load") || !iequals(into_kw, "into")) {
+        return false;
+    }
+    file_name.assign(file_token.data(), file_token.size());
+    tab_name.assign(table_token.data(), table_token.size());
+    return true;
 }
 
 void *client_handler(void *sock_fd) {
@@ -173,10 +206,11 @@ void *client_handler(void *sock_fd) {
             break;
         }
 
-        if (strcmp(data_recv, "exit") == 0) {
+        const std::string_view raw_cmd = trim_command_view(data_recv, i_recvBytes);
+        if (iequals(raw_cmd, "exit")) {
             break;
         }
-        if (strcmp(data_recv, "crash") == 0) {
+        if (iequals(raw_cmd, "crash")) {
             exit(1);
         }
 
@@ -184,12 +218,11 @@ void *client_handler(void *sock_fd) {
         offset = 0;
 
         // 开启事务，初始化系统所需的上下文信息（包括事务对象指针、锁管理器指针、日志管理器指针、存放结果的buffer、记录结果长度的变量）
-        auto context = std::make_unique<Context>(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset,
-                                                 txn_manager.get(), &session_isolation_level,
-                                                 &isolation_output_format, &output_file_enabled);
+        Context context(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset,
+                        txn_manager.get(), &session_isolation_level,
+                        &isolation_output_format, &output_file_enabled);
 
-        std::string raw_cmd = trim_command(data_recv);
-        if (lower_command(raw_cmd) == "set output_file off") {
+        if (iequals(raw_cmd, "set output_file off")) {
             output_file_enabled = false;
             if (write(fd, data_send, offset + 1) == -1) {
                 break;
@@ -200,14 +233,14 @@ void *client_handler(void *sock_fd) {
         std::string load_table;
         if (parse_load_command(raw_cmd, load_file, load_table)) {
             try {
-                EnsureStatementTransaction(&txn_id, context.get(), session_isolation_level);
-                sm_manager->load_table(load_file, load_table, context.get());
+                EnsureStatementTransaction(&txn_id, &context, session_isolation_level);
+                sm_manager->load_table(load_file, load_table, &context);
             } catch (TransactionAbortException &e) {
                 std::string str = "abort\n";
                 memcpy(data_send, str.c_str(), str.length());
                 data_send[str.length()] = '\0';
                 offset = str.length();
-                AbortActiveTransaction(&txn_id, context.get());
+                AbortActiveTransaction(&txn_id, &context);
                 if (output_file_enabled) {
                     std::fstream outfile;
                     outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
@@ -215,7 +248,7 @@ void *client_handler(void *sock_fd) {
                     outfile.close();
                 }
             } catch (RMDBError &e) {
-                AbortActiveTransaction(&txn_id, context.get());
+                AbortActiveTransaction(&txn_id, &context);
                 memcpy(data_send, e.what(), e.get_msg_len());
                 data_send[e.get_msg_len()] = '\n';
                 data_send[e.get_msg_len() + 1] = '\0';
@@ -227,13 +260,13 @@ void *client_handler(void *sock_fd) {
                     outfile.close();
                 }
             }
-            if(context->txn_ != nullptr && context->txn_->get_txn_mode() == false &&
-               context->txn_->get_state() != TransactionState::COMMITTED &&
-               context->txn_->get_state() != TransactionState::ABORTED)
+            if(context.txn_ != nullptr && context.txn_->get_txn_mode() == false &&
+               context.txn_->get_state() != TransactionState::COMMITTED &&
+               context.txn_->get_state() != TransactionState::ABORTED)
             {
-                txn_manager->commit(context->txn_, context->log_mgr_);
-                txn_manager->release_transaction(context->txn_);
-                context->txn_ = nullptr;
+                txn_manager->commit(context.txn_, context.log_mgr_);
+                txn_manager->release_transaction(context.txn_);
+                context.txn_ = nullptr;
                 txn_id = INVALID_TXN_ID;
             }
             if (write(fd, data_send, offset + 1) == -1) {
@@ -255,13 +288,13 @@ void *client_handler(void *sock_fd) {
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
                     if (query_needs_transaction(query)) {
-                        EnsureStatementTransaction(&txn_id, context.get(), session_isolation_level);
+                        EnsureStatementTransaction(&txn_id, &context, session_isolation_level);
                     }
                     // 优化器
-                    std::shared_ptr<Plan> plan = optimizer->plan_query(query, context.get());
+                    std::shared_ptr<Plan> plan = optimizer->plan_query(query, &context);
                     // portal
-                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context.get());
-                    portal->run(portalStmt, ql_manager.get(), &txn_id, context.get());
+                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, &context);
+                    portal->run(portalStmt, ql_manager.get(), &txn_id, &context);
                     portal->drop();
                     if (std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
                         isolation_output_format.store(true);
@@ -274,7 +307,7 @@ void *client_handler(void *sock_fd) {
                     offset = str.length();
 
                     // 回滚事务
-                    AbortActiveTransaction(&txn_id, context.get());
+                    AbortActiveTransaction(&txn_id, &context);
 
                     if (output_file_enabled) {
                         std::fstream outfile;
@@ -284,7 +317,7 @@ void *client_handler(void *sock_fd) {
                     }
                 } catch (RMDBError &e) {
                     // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
-                    AbortActiveTransaction(&txn_id, context.get());
+                    AbortActiveTransaction(&txn_id, &context);
 
                     memcpy(data_send, e.what(), e.get_msg_len());
                     data_send[e.get_msg_len()] = '\n';
@@ -320,13 +353,13 @@ void *client_handler(void *sock_fd) {
         // future TODO: 格式化 sql_handler.result, 传给客户端
         // send result with fixed format, use protobuf in the future
         // 如果是单挑语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务
-        if(context->txn_ != nullptr && context->txn_->get_txn_mode() == false &&
-           context->txn_->get_state() != TransactionState::COMMITTED &&
-           context->txn_->get_state() != TransactionState::ABORTED)
+        if(context.txn_ != nullptr && context.txn_->get_txn_mode() == false &&
+           context.txn_->get_state() != TransactionState::COMMITTED &&
+           context.txn_->get_state() != TransactionState::ABORTED)
         {
-            txn_manager->commit(context->txn_, context->log_mgr_);
-            txn_manager->release_transaction(context->txn_);
-            context->txn_ = nullptr;
+            txn_manager->commit(context.txn_, context.log_mgr_);
+            txn_manager->release_transaction(context.txn_);
+            context.txn_ = nullptr;
             txn_id = INVALID_TXN_ID;
         }
         if (write(fd, data_send, offset + 1) == -1) {

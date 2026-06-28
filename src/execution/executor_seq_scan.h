@@ -34,10 +34,10 @@ class SeqScanExecutor : public AbstractExecutor {
     bool ser_read_registered_ = false;
 
     SmManager *sm_manager_;
+    bool use_2pl_locks_ = false;
 
     bool use_2pl_locks() const {
-        return context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
-               (context_->txn_mgr_ == nullptr || !context_->txn_mgr_->IsMvccTxn(context_->txn_));
+        return use_2pl_locks_;
     }
 
     void register_ser_read_once() {
@@ -54,7 +54,8 @@ class SeqScanExecutor : public AbstractExecutor {
         }
         std::unique_ptr<RmRecord> visible;
         try {
-            if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+            if (context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                context_->txn_mgr_->HasMvccState()) {
                 visible = context_->txn_mgr_->GetVisibleRecord(
                     tab_name_, current_rid, context_->txn_,
                     [&]() { return fh_->get_record(current_rid, context_); });
@@ -84,6 +85,10 @@ class SeqScanExecutor : public AbstractExecutor {
         len_ = cols_.back().offset + cols_.back().len;
 
         context_ = context;
+        bool is_mvcc_txn = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                           context_->txn_mgr_->IsMvccTxn(context_->txn_);
+        use_2pl_locks_ = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
+                         (context_->txn_mgr_ == nullptr || !is_mvcc_txn);
 
         fed_conds_ = conds_;
     }

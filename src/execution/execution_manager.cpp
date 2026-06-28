@@ -20,6 +20,7 @@ See the Mulan PSL v2 for more details. */
 #include "index/ix.h"
 #include "record_printer.h"
 
+#include <cstdio>
 #include <iomanip>
 #include <sstream>
 
@@ -92,6 +93,34 @@ static std::string format_legacy_output(const std::vector<std::string> &captions
         print_record(row);
     }
     return os.str();
+}
+
+static std::string format_field(const ColMeta &col, const char *rec_buf) {
+    if (col.type == TYPE_INT) {
+        return std::to_string(*(const int *)rec_buf);
+    }
+    if (col.type == TYPE_FLOAT) {
+        char buf[64];
+        int len = std::snprintf(buf, sizeof(buf), "%.6f", *(const float *)rec_buf);
+        return std::string(buf, len);
+    }
+    std::string col_str(rec_buf, col.len);
+    col_str.resize(strlen(col_str.c_str()));
+    return col_str;
+}
+
+static void print_field_to_response(const RecordPrinter &printer, const ColMeta &col,
+                                    const char *rec_buf, Context *context) {
+    char buf[64];
+    if (col.type == TYPE_INT) {
+        int len = std::snprintf(buf, sizeof(buf), "%d", *(const int *)rec_buf);
+        printer.print_cell(std::string_view(buf, len), context);
+    } else if (col.type == TYPE_FLOAT) {
+        int len = std::snprintf(buf, sizeof(buf), "%.6f", *(const float *)rec_buf);
+        printer.print_cell(std::string_view(buf, len), context);
+    } else {
+        printer.print_cell(std::string_view(rec_buf, strnlen(rec_buf, col.len)), context);
+    }
 }
 
 // 主要负责执行DDL语句
@@ -264,10 +293,20 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
         captions.push_back(sel_col.col_name);
     }
 
+    bool write_output_file = context->output_file_enabled_ == nullptr || *context->output_file_enabled_;
     constexpr size_t SELECT_BATCH_SIZE = 256;
     std::vector<std::vector<std::string>> rows;
+    if (write_output_file) {
+        rows.reserve(SELECT_BATCH_SIZE);
+    }
     std::vector<std::unique_ptr<RmRecord>> batch;
     batch.reserve(SELECT_BATCH_SIZE);
+    RecordPrinter rec_printer(sel_cols.size());
+    rec_printer.print_separator(context);
+    rec_printer.print_record(captions, context);
+    rec_printer.print_separator(context);
+    size_t row_count = 0;
+    const auto &output_cols = executorTreeRoot->cols();
     executorTreeRoot->beginTuple();
     while (!executorTreeRoot->is_end()) {
         size_t batch_size = executorTreeRoot->NextBatch(batch, SELECT_BATCH_SIZE);
@@ -275,43 +314,31 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
             break;
         }
         for (auto &Tuple : batch) {
-            std::vector<std::string> columns;
-            for (auto &col : executorTreeRoot->cols()) {
-                std::string col_str;
-                char *rec_buf = Tuple->data + col.offset;
-                if (col.type == TYPE_INT) {
-                    col_str = std::to_string(*(int *)rec_buf);
-                } else if (col.type == TYPE_FLOAT) {
-                    std::ostringstream os;
-                    os << std::fixed << std::setprecision(6) << *(float *)rec_buf;
-                    col_str = os.str();
-                } else if (col.type == TYPE_STRING) {
-                    col_str = std::string((char *)rec_buf, col.len);
-                    col_str.resize(strlen(col_str.c_str()));
+            if (!write_output_file) {
+                for (auto &col : output_cols) {
+                    print_field_to_response(rec_printer, col, Tuple->data + col.offset, context);
                 }
-                columns.push_back(col_str);
+                rec_printer.finish_record(context);
+            } else {
+                std::vector<std::string> columns;
+                columns.reserve(output_cols.size());
+                for (auto &col : output_cols) {
+                    columns.push_back(format_field(col, Tuple->data + col.offset));
+                }
+                rec_printer.print_record(columns, context);
+                rows.push_back(std::move(columns));
             }
-            rows.push_back(std::move(columns));
+            ++row_count;
         }
     }
     executorTreeRoot->finish();
 
-    // Print header into buffer
-    RecordPrinter rec_printer(sel_cols.size());
-    rec_printer.print_separator(context);
-    rec_printer.print_record(captions, context);
-    rec_printer.print_separator(context);
-    // Print records
-    for (auto &columns : rows) {
-        // print record into buffer
-        rec_printer.print_record(columns, context);
-    }
     // Print footer into buffer
     rec_printer.print_separator(context);
     // Print record count into buffer
-    RecordPrinter::print_record_count(rows.size(), context);
+    RecordPrinter::print_record_count(row_count, context);
 
-    if (context->output_file_enabled_ == nullptr || *context->output_file_enabled_) {
+    if (write_output_file) {
         std::fstream outfile;
         outfile.open(sm_manager_->db_.name() + "/output.txt", std::ios::out | std::ios::app);
         if (context->isolation_output_format_ != nullptr && context->isolation_output_format_->load()) {

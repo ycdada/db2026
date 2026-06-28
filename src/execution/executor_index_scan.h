@@ -24,7 +24,7 @@ See the Mulan PSL v2 for more details. */
 class IndexScanExecutor : public AbstractExecutor {
    private:
     std::string tab_name_;                      // 表名称
-    TabMeta tab_;                               // 表的元数据
+    TabMeta *tab_;                              // 表的元数据
     std::vector<Condition> conds_;              // 扫描条件
     RmFileHandle *fh_;                          // 表的数据文件句柄
     std::vector<ColMeta> cols_;                 // 需要读取的字段
@@ -33,6 +33,9 @@ class IndexScanExecutor : public AbstractExecutor {
 
     std::vector<std::string> index_col_names_;  // index scan涉及到的索引包含的字段
     IndexMeta index_meta_;                      // index scan涉及到的索引元数据
+    IxIndexHandle *ih_ = nullptr;
+    std::vector<char> lower_key_;
+    std::vector<char> upper_key_;
 
     Rid rid_;
     std::unique_ptr<RecScan> scan_;
@@ -50,10 +53,11 @@ class IndexScanExecutor : public AbstractExecutor {
     TabCol join_outer_col_;
     std::string join_inner_col_;
     Value join_key_val_;
+    bool use_2pl_locks_ = false;
+    bool is_mvcc_txn_ = false;
 
     bool use_2pl_locks() const {
-        return context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
-               (context_->txn_mgr_ == nullptr || !context_->txn_mgr_->IsMvccTxn(context_->txn_));
+        return use_2pl_locks_;
     }
 
     void register_ser_read_once() {
@@ -64,8 +68,7 @@ class IndexScanExecutor : public AbstractExecutor {
     }
 
     void load_mvcc_extra_records() {
-        if (context_ != nullptr && context_->txn_mgr_ != nullptr &&
-            context_->txn_mgr_->IsMvccTxn(context_->txn_)) {
+        if (is_mvcc_txn_ && context_ != nullptr && context_->txn_mgr_ != nullptr) {
             extra_records_ = context_->txn_mgr_->CollectVisibleVersionRecords(tab_name_, cols_, fed_conds_,
                                                                               seen_rids_, context_->txn_);
         } else {
@@ -93,7 +96,8 @@ class IndexScanExecutor : public AbstractExecutor {
         }
         std::unique_ptr<RmRecord> rec;
         try {
-            if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+            if (context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                context_->txn_mgr_->HasMvccState()) {
                 rec = context_->txn_mgr_->GetVisibleRecord(
                     tab_name_, rid, context_->txn_,
                     [&]() { return fh_->get_record(rid, context_); });
@@ -153,16 +157,6 @@ class IndexScanExecutor : public AbstractExecutor {
         }
     }
 
-    std::vector<Condition> col_conds(const std::string &col_name) {
-        std::vector<Condition> res;
-        for (auto &cond : fed_conds_) {
-            if (cond.is_rhs_val && cond.lhs_col.tab_name == tab_name_ && cond.lhs_col.col_name == col_name) {
-                res.push_back(cond);
-            }
-        }
-        return res;
-    }
-
     const ColMeta &find_col(const std::vector<ColMeta> &cols, const std::string &tab_name, const std::string &col_name) {
         auto pos = std::find_if(cols.begin(), cols.end(), [&](const ColMeta &col) {
             return col.tab_name == tab_name && col.name == col_name;
@@ -179,28 +173,37 @@ class IndexScanExecutor : public AbstractExecutor {
         sm_manager_ = sm_manager;
         context_ = context;
         tab_name_ = std::move(tab_name);
-        tab_ = sm_manager_->db_.get_table(tab_name_);
+        tab_ = &sm_manager_->db_.get_table(tab_name_);
         conds_ = std::move(conds);
         // index_no_ = index_no;
-        index_col_names_ = index_col_names; 
-        index_meta_ = *(tab_.get_index_meta(index_col_names_));
+        index_col_names_ = std::move(index_col_names);
+        index_meta_ = *(tab_->get_index_meta(index_col_names_));
+        ih_ = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols)).get();
+        lower_key_.resize(index_meta_.col_tot_len);
+        upper_key_.resize(index_meta_.col_tot_len);
         fh_ = sm_manager_->fhs_.at(tab_name_).get();
-        cols_ = tab_.cols;
+        cols_ = tab_->cols;
         len_ = cols_.back().offset + cols_.back().len;
         is_join_inner_ = is_join_inner;
         join_outer_col_ = std::move(join_outer_col);
         join_inner_col_ = std::move(join_inner_col);
-        std::map<CompOp, CompOp> swap_op = {
-            {OP_EQ, OP_EQ}, {OP_NE, OP_NE}, {OP_LT, OP_GT}, {OP_GT, OP_LT}, {OP_LE, OP_GE}, {OP_GE, OP_LE},
-        };
-
+        is_mvcc_txn_ = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                       context_->txn_mgr_->IsMvccTxn(context_->txn_);
+        use_2pl_locks_ = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
+                         (context_->txn_mgr_ == nullptr || !is_mvcc_txn_);
         for (auto &cond : conds_) {
             if (cond.lhs_col.tab_name != tab_name_) {
                 // lhs is on other table, now rhs must be on this table
                 assert(!cond.is_rhs_val && cond.rhs_col.tab_name == tab_name_);
                 // swap lhs and rhs
                 std::swap(cond.lhs_col, cond.rhs_col);
-                cond.op = swap_op.at(cond.op);
+                switch (cond.op) {
+                    case OP_LT: cond.op = OP_GT; break;
+                    case OP_GT: cond.op = OP_LT; break;
+                    case OP_LE: cond.op = OP_GE; break;
+                    case OP_GE: cond.op = OP_LE; break;
+                    default: break;
+                }
             }
         }
         fed_conds_ = conds_;
@@ -234,9 +237,6 @@ class IndexScanExecutor : public AbstractExecutor {
         extra_pos_ = 0;
         cur_rec_ = nullptr;
         end_ = true;
-        auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols)).get();
-        std::vector<char> lower_key(index_meta_.col_tot_len);
-        std::vector<char> upper_key(index_meta_.col_tot_len);
         bool has_lower = false;
         bool has_upper = false;
         bool lower_open = false;
@@ -245,39 +245,44 @@ class IndexScanExecutor : public AbstractExecutor {
         int offset = 0;
 
         for (auto &col : index_meta_.cols) {
-            auto conds = stop_prefix ? std::vector<Condition>() : col_conds(col.name);
             const Condition *eq = nullptr;
             const Condition *lower = nullptr;
             const Condition *upper = nullptr;
-            for (auto &cond : conds) {
-                if (cond.op == OP_EQ) {
-                    eq = &cond;
-                } else if (cond.op == OP_GT || cond.op == OP_GE) {
-                    lower = &cond;
-                } else if (cond.op == OP_LT || cond.op == OP_LE) {
-                    upper = &cond;
+            if (!stop_prefix) {
+                for (auto &cond : fed_conds_) {
+                    if (!cond.is_rhs_val || cond.lhs_col.tab_name != tab_name_ ||
+                        cond.lhs_col.col_name != col.name) {
+                        continue;
+                    }
+                    if (cond.op == OP_EQ) {
+                        eq = &cond;
+                    } else if (cond.op == OP_GT || cond.op == OP_GE) {
+                        lower = &cond;
+                    } else if (cond.op == OP_LT || cond.op == OP_LE) {
+                        upper = &cond;
+                    }
                 }
             }
 
             if (eq != nullptr) {
-                memcpy(lower_key.data() + offset, eq->rhs_val.raw->data, col.len);
-                memcpy(upper_key.data() + offset, eq->rhs_val.raw->data, col.len);
+                memcpy(lower_key_.data() + offset, eq->rhs_val.raw->data, col.len);
+                memcpy(upper_key_.data() + offset, eq->rhs_val.raw->data, col.len);
                 has_lower = true;
                 has_upper = true;
             } else {
                 if (lower != nullptr) {
-                    memcpy(lower_key.data() + offset, lower->rhs_val.raw->data, col.len);
+                    memcpy(lower_key_.data() + offset, lower->rhs_val.raw->data, col.len);
                     has_lower = true;
                     lower_open = lower->op == OP_GT;
                 } else {
-                    fill_min_key(lower_key.data(), offset, col);
+                    fill_min_key(lower_key_.data(), offset, col);
                 }
                 if (upper != nullptr) {
-                    memcpy(upper_key.data() + offset, upper->rhs_val.raw->data, col.len);
+                    memcpy(upper_key_.data() + offset, upper->rhs_val.raw->data, col.len);
                     has_upper = true;
                     upper_open = upper->op == OP_LT;
                 } else {
-                    fill_max_key(upper_key.data(), offset, col);
+                    fill_max_key(upper_key_.data(), offset, col);
                 }
                 stop_prefix = true;
             }
@@ -285,13 +290,13 @@ class IndexScanExecutor : public AbstractExecutor {
         }
 
         Iid lower = has_lower
-                        ? (lower_open ? ih->upper_bound(lower_key.data()) : ih->lower_bound(lower_key.data()))
-                        : ih->leaf_begin();
+                        ? (lower_open ? ih_->upper_bound(lower_key_.data()) : ih_->lower_bound(lower_key_.data()))
+                        : ih_->leaf_begin();
         Iid upper = has_upper
-                        ? (upper_open ? ih->lower_bound(upper_key.data()) : ih->upper_bound(upper_key.data()))
-                        : ih->leaf_end();
+                        ? (upper_open ? ih_->lower_bound(upper_key_.data()) : ih_->upper_bound(upper_key_.data()))
+                        : ih_->leaf_end();
 
-        scan_ = std::make_unique<IxScan>(ih, lower, upper, sm_manager_->get_bpm());
+        scan_ = std::make_unique<IxScan>(ih_, lower, upper, sm_manager_->get_bpm());
         advance_to_next_match();
     }
 

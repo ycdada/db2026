@@ -48,6 +48,8 @@ public:
     txn_id_t log_tid_;         /* 创建当前日志的事务ID */
     lsn_t prev_lsn_;           /* 事务创建的前一条日志记录的lsn，用于undo */
 
+    virtual ~LogRecord() = default;
+
     // 把日志记录序列化到dest中
     virtual void serialize (char* dest) const {
         memcpy(dest + OFFSET_LOG_TYPE, &log_type_, sizeof(LogType));
@@ -146,9 +148,9 @@ public:
         log_tot_len_ = LOG_HEADER_SIZE;
         log_tid_ = INVALID_TXN_ID;
         prev_lsn_ = INVALID_LSN;
-        table_name_ = nullptr;
+        table_name_size_ = 0;
     }
-    InsertLogRecord(txn_id_t txn_id, RmRecord& insert_value, Rid& rid, std::string table_name) 
+    InsertLogRecord(txn_id_t txn_id, RmRecord& insert_value, Rid& rid, std::string table_name)
         : InsertLogRecord() {
         log_tid_ = txn_id;
         insert_value_ = insert_value;
@@ -156,9 +158,8 @@ public:
         log_tot_len_ += sizeof(int);
         log_tot_len_ += insert_value_.size;
         log_tot_len_ += sizeof(Rid);
-        table_name_size_ = table_name.length();
-        table_name_ = new char[table_name_size_];
-        memcpy(table_name_, table_name.c_str(), table_name_size_);
+        table_name_ = std::move(table_name);
+        table_name_size_ = table_name_.size();
         log_tot_len_ += sizeof(size_t) + table_name_size_;
     }
 
@@ -174,7 +175,7 @@ public:
         offset += sizeof(Rid);
         memcpy(dest + offset, &table_name_size_, sizeof(size_t));
         offset += sizeof(size_t);
-        memcpy(dest + offset, table_name_, table_name_size_);
+        memcpy(dest + offset, table_name_.data(), table_name_size_);
     }
     // 从src中反序列化出一条Insert日志记录
     void deserialize(const char* src) override {
@@ -185,20 +186,19 @@ public:
         offset += sizeof(Rid);
         table_name_size_ = *reinterpret_cast<const size_t*>(src + offset);
         offset += sizeof(size_t);
-        table_name_ = new char[table_name_size_];
-        memcpy(table_name_, src + offset, table_name_size_);
+        table_name_.assign(src + offset, table_name_size_);
     }
     void format_print() override {
         printf("insert record\n");
         LogRecord::format_print();
         printf("insert_value: %s\n", insert_value_.data);
         printf("insert rid: %d, %d\n", rid_.page_no, rid_.slot_no);
-        printf("table name: %s\n", table_name_);
+        printf("table name: %s\n", table_name_.c_str());
     }
 
     RmRecord insert_value_;     // 插入的记录
     Rid rid_;                   // 记录插入的位置
-    char* table_name_;          // 插入记录的表名称
+    std::string table_name_;    // 插入记录的表名称
     size_t table_name_size_;    // 表名称的大小
 };
 

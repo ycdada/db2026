@@ -18,13 +18,26 @@ See the Mulan PSL v2 for more details. */
 
 class UpdateExecutor : public AbstractExecutor {
    private:
-    TabMeta tab_;
+    TabMeta *tab_;
     std::vector<Condition> conds_;
     RmFileHandle *fh_;
     std::vector<Rid> rids_;
     std::string tab_name_;
     std::vector<SetClause> set_clauses_;
     SmManager *sm_manager_;
+    std::vector<const ColMeta *> set_lhs_cols_;
+    std::vector<const ColMeta *> set_rhs_cols_;
+    std::vector<IxIndexHandle *> index_handles_;
+
+    bool index_key_changed(const IndexMeta &index, const RmRecord &old_rec, const RmRecord &new_rec) const {
+        for (int i = 0; i < index.col_num; ++i) {
+            auto &col = index.cols[i];
+            if (memcmp(old_rec.data + col.offset, new_rec.data + col.offset, col.len) != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     [[noreturn]] void abort_mvcc_statement() {
         auto txn = context_ != nullptr ? context_->txn_ : nullptr;
@@ -42,30 +55,52 @@ class UpdateExecutor : public AbstractExecutor {
                    std::vector<Condition> conds, std::vector<Rid> rids, Context *context) {
         sm_manager_ = sm_manager;
         tab_name_ = tab_name;
-        set_clauses_ = set_clauses;
-        tab_ = sm_manager_->db_.get_table(tab_name);
+        set_clauses_ = std::move(set_clauses);
+        tab_ = &sm_manager_->db_.get_table(tab_name);
         fh_ = sm_manager_->fhs_.at(tab_name).get();
-        conds_ = conds;
-        rids_ = rids;
+        conds_ = std::move(conds);
+        rids_ = std::move(rids);
         context_ = context;
+        index_handles_.reserve(tab_->indexes.size());
+        for (auto &index : tab_->indexes) {
+            index_handles_.push_back(
+                sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get());
+        }
+        set_lhs_cols_.reserve(set_clauses_.size());
+        set_rhs_cols_.reserve(set_clauses_.size());
+        for (auto &set_clause : set_clauses_) {
+            const ColMeta *lhs_meta = nullptr;
+            const ColMeta *rhs_meta = nullptr;
+            for (auto &col : tab_->cols) {
+                if (col.name == set_clause.lhs.col_name) {
+                    lhs_meta = &col;
+                }
+                if (set_clause.is_rhs_expr && col.name == set_clause.rhs_col.col_name) {
+                    rhs_meta = &col;
+                }
+            }
+            set_lhs_cols_.push_back(lhs_meta);
+            set_rhs_cols_.push_back(rhs_meta);
+        }
     }
     std::unique_ptr<RmRecord> Next() override {
+        bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                    context_->txn_mgr_->IsMvccTxn(context_->txn_);
+        // RC 写者在有活跃 SI/SER 事务时也要保留旧版本（题目9 示例二）。
+        bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                              context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
+        bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
+                             (context_->txn_mgr_ == nullptr ||
+                              !context_->txn_mgr_->IsMvccTxn(context_->txn_));
         for (auto &rid : rids_) {
             // 获取当前记录
-            bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
-            // RC 写者在有活跃 SI/SER 事务时也要保留旧版本（题目9 示例二）。
-            bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                                  context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
-            bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
-                                 (context_->txn_mgr_ == nullptr ||
-                                  !context_->txn_mgr_->IsMvccTxn(context_->txn_));
             if (use_2pl_locks) {
                 context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid, fh_->GetFd());
             }
             std::unique_ptr<RmRecord> old_rec;
             try {
-                if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+                if (context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                    context_->txn_mgr_->HasMvccState()) {
                     old_rec = context_->txn_mgr_->GetVisibleRecord(
                         tab_name_, rid, context_->txn_,
                         [&]() { return fh_->get_record(rid, context_); });
@@ -75,37 +110,23 @@ class UpdateExecutor : public AbstractExecutor {
             } catch (const RecordNotFoundError &) {
                 continue;
             }
-            if (mvcc) {
-                if (old_rec == nullptr) continue;
-                if (!eval_conds(old_rec->data, tab_.cols, conds_)) continue;
-            } else if (old_rec == nullptr) {
+            if (old_rec == nullptr) {
                 continue;
             }
-            if (!eval_conds(old_rec->data, tab_.cols, conds_)) {
+            if (!eval_conds(old_rec->data, tab_->cols, conds_)) {
                 continue;
             }
             auto new_rec = std::make_unique<RmRecord>(fh_->get_file_hdr().record_size, old_rec->data);
 
-            for (auto &set_clause : set_clauses_) {
-                const ColMeta *col_meta = nullptr;
-                for (auto &col : tab_.cols) {
-                    if (col.name == set_clause.lhs.col_name) {
-                        col_meta = &col;
-                        break;
-                    }
-                }
+            for (size_t set_idx = 0; set_idx < set_clauses_.size(); ++set_idx) {
+                auto &set_clause = set_clauses_[set_idx];
+                const ColMeta *col_meta = set_lhs_cols_[set_idx];
                 if (!col_meta) continue;
                 if (!set_clause.is_rhs_expr) {
                     memcpy(new_rec->data + col_meta->offset, set_clause.rhs.raw->data, col_meta->len);
                     continue;
                 }
-                const ColMeta *rhs_meta = nullptr;
-                for (auto &col : tab_.cols) {
-                    if (col.name == set_clause.rhs_col.col_name) {
-                        rhs_meta = &col;
-                        break;
-                    }
-                }
+                const ColMeta *rhs_meta = set_rhs_cols_[set_idx];
                 if (!rhs_meta) continue;
                 if (col_meta->type == TYPE_INT) {
                     int lhs = rhs_meta->type == TYPE_INT
@@ -128,16 +149,17 @@ class UpdateExecutor : public AbstractExecutor {
                 }
             }
 
-	            if (mvcc) {
-	                context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *old_rec, context_->txn_);
-	                context_->txn_mgr_->CheckMvccUniqueConflict(tab_name_, *new_rec, context_->txn_, &rid);
-	            }
+            if (mvcc) {
+                context_->txn_mgr_->CheckMvccWriteConflict(tab_name_, rid, *old_rec, context_->txn_);
+                context_->txn_mgr_->CheckMvccUniqueConflict(tab_name_, *new_rec, context_->txn_, &rid);
+            }
 
             bool write_record_appended = false;
             if (version_writes) {
                 context_->txn_mgr_->MvccUpdate(tab_name_, rid, *old_rec, *new_rec, context_->txn_);
                 if (context_->txn_ != nullptr) {
-                    context_->txn_->append_write_record(new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *old_rec));
+                    context_->txn_->append_write_record(
+                        new WriteRecord(WType::UPDATE_TUPLE, tab_name_, fh_->GetFd(), rid, *old_rec));
                     write_record_appended = true;
                 }
             }
@@ -157,10 +179,12 @@ class UpdateExecutor : public AbstractExecutor {
             std::vector<std::pair<IxIndexHandle *, std::vector<char>>> deleted_old_index_entries;
             std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_new_index_entries;
             try {
-                for (size_t i = 0; i < tab_.indexes.size(); ++i) {
-                    auto &index = tab_.indexes[i];
-                    auto ih = sm_manager_->ihs_.at(
-                        sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                for (size_t i = 0; i < tab_->indexes.size(); ++i) {
+                    auto &index = tab_->indexes[i];
+                    if (!index_key_changed(index, *old_rec, *new_rec)) {
+                        continue;
+                    }
+                    auto ih = index_handles_[i];
                     std::vector<char> old_key(index.col_tot_len);
                     std::vector<char> new_key(index.col_tot_len);
                     int offset = 0;
@@ -169,9 +193,7 @@ class UpdateExecutor : public AbstractExecutor {
                         memcpy(new_key.data() + offset, new_rec->data + index.cols[j].offset, index.cols[j].len);
                         offset += index.cols[j].len;
                     }
-                    if (old_key != new_key) {
-                        changed_index_entries.push_back({ih, std::move(old_key), std::move(new_key)});
-                    }
+                    changed_index_entries.push_back({ih, std::move(old_key), std::move(new_key)});
                 }
 
                 // 只维护键值实际变化的索引，避免非索引列更新期间短暂移除索引项。
@@ -206,7 +228,8 @@ class UpdateExecutor : public AbstractExecutor {
                 throw;
             }
             if (!write_record_appended && context_->txn_ != nullptr) {
-                context_->txn_->append_write_record(new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *old_rec));
+                context_->txn_->append_write_record(
+                    new WriteRecord(WType::UPDATE_TUPLE, tab_name_, fh_->GetFd(), rid, *old_rec));
             }
         }
         return nullptr;

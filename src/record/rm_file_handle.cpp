@@ -177,7 +177,13 @@ void RmFileHandle::update_record(const Rid& rid, char* buf, Context* context) {
     // 2. 更新记录
     char *slot = page_handle.get_slot(rid.slot_no);
     memcpy(slot, buf, file_hdr_.record_size);
-    shared_state_->records[memory_key(rid)] = std::make_unique<RmRecord>(file_hdr_.record_size, buf);
+    auto mem_key = memory_key(rid);
+    auto mem_it = shared_state_->records.find(mem_key);
+    if (mem_it != shared_state_->records.end()) {
+        mem_it->second->SetData(buf);
+    } else {
+        shared_state_->records[mem_key] = std::make_unique<RmRecord>(file_hdr_.record_size, buf);
+    }
     shared_state_->file_hdr = file_hdr_;
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);

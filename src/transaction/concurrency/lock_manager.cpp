@@ -51,6 +51,17 @@ bool LockManager::lock(Transaction *txn, LockDataId lid, LockMode mode) {
         return merge_lock(held, req) == held;
     };
 
+    auto group_from_lock = [](LockMode lock_mode) -> GroupLockMode {
+        switch (lock_mode) {
+            case LockMode::INTENTION_SHARED: return GroupLockMode::IS;
+            case LockMode::INTENTION_EXCLUSIVE: return GroupLockMode::IX;
+            case LockMode::SHARED: return GroupLockMode::S;
+            case LockMode::S_IX: return GroupLockMode::SIX;
+            case LockMode::EXLUCSIVE: return GroupLockMode::X;
+        }
+        return GroupLockMode::NON_LOCK;
+    };
+
     auto recompute_group = [](LockRequestQueue &queue) {
         bool has_is = false, has_ix = false, has_s = false, has_six = false, has_x = false;
         for (auto &r : queue.request_queue_) {
@@ -80,6 +91,13 @@ bool LockManager::lock(Transaction *txn, LockDataId lid, LockMode mode) {
     std::lock_guard<std::mutex> guard(shard.latch_);
 
     auto &queue = shard.lock_table_[lid];
+    if (queue.request_queue_.empty()) {
+        queue.request_queue_.emplace_back(txn->get_transaction_id(), mode);
+        queue.request_queue_.back().granted_ = true;
+        queue.group_lock_mode_ = group_from_lock(mode);
+        txn->get_lock_set()->insert(lid);
+        return true;
+    }
 
     LockRequest *own_request = nullptr;
     for (auto &req : queue.request_queue_) {
@@ -150,6 +168,19 @@ bool LockManager::unlock(Transaction *txn, LockDataId lock_data_id) {
     if (it == shard.lock_table_.end()) return false;
 
     auto &queue = it->second;
+    if (queue.request_queue_.size() == 1) {
+        auto req_it = queue.request_queue_.begin();
+        if (req_it->txn_id_ == txn->get_transaction_id() && req_it->granted_) {
+            txn->get_lock_set()->erase(lock_data_id);
+            if (txn->get_state() == TransactionState::GROWING ||
+                txn->get_state() == TransactionState::DEFAULT) {
+                txn->set_state(TransactionState::SHRINKING);
+            }
+            shard.lock_table_.erase(it);
+            return true;
+        }
+    }
+
     for (auto req_it = queue.request_queue_.begin(); req_it != queue.request_queue_.end(); ++req_it) {
         if (req_it->txn_id_ == txn->get_transaction_id() && req_it->granted_) {
             queue.request_queue_.erase(req_it);

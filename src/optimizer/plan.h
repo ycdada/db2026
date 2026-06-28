@@ -74,8 +74,7 @@ class ScanPlan : public Plan
             TabMeta &tab = sm_manager->db_.get_table(tab_name_);
             cols_ = tab.cols;
             len_ = cols_.back().offset + cols_.back().len;
-            fed_conds_ = conds_;
-            index_col_names_ = index_col_names;
+            index_col_names_ = std::move(index_col_names);
         
         }
         ~ScanPlan(){}
@@ -84,7 +83,6 @@ class ScanPlan : public Plan
         std::vector<ColMeta> cols_;                
         std::vector<Condition> conds_;             
         size_t len_;                               
-        std::vector<Condition> fed_conds_;
         std::vector<std::string> index_col_names_;
         bool is_join_inner_ = false;
         TabCol join_outer_col_;

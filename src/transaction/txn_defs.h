@@ -43,10 +43,14 @@ class WriteRecord {
     // constructor for insert operation
     WriteRecord(WType wtype, const std::string &tab_name, const Rid &rid)
         : wtype_(wtype), tab_name_(tab_name), rid_(rid) {}
+    WriteRecord(WType wtype, const std::string &tab_name, int fd, const Rid &rid)
+        : wtype_(wtype), tab_name_(tab_name), fd_(fd), rid_(rid) {}
 
     // constructor for delete & update operation
     WriteRecord(WType wtype, const std::string &tab_name, const Rid &rid, const RmRecord &record)
         : wtype_(wtype), tab_name_(tab_name), rid_(rid), record_(record) {}
+    WriteRecord(WType wtype, const std::string &tab_name, int fd, const Rid &rid, const RmRecord &record)
+        : wtype_(wtype), tab_name_(tab_name), fd_(fd), rid_(rid), record_(record) {}
 
     ~WriteRecord() = default;
 
@@ -58,9 +62,12 @@ class WriteRecord {
 
     inline std::string &GetTableName() { return tab_name_; }
 
+    inline int GetFd() const { return fd_; }
+
    private:
     WType wtype_;
     std::string tab_name_;
+    int fd_ = -1;
     Rid rid_;
     RmRecord record_;
 };

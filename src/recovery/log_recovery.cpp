@@ -194,7 +194,7 @@ void RecoveryManager::apply_redo(LogRecord *record) {
     switch (record->log_type_) {
         case LogType::INSERT: {
             auto *log = static_cast<InsertLogRecord *>(record);
-            redo_insert(std::string(log->table_name_, log->table_name_size_), log->rid_, log->insert_value_);
+            redo_insert(log->table_name_, log->rid_, log->insert_value_);
             break;
         }
         case LogType::DELETE: {
@@ -227,7 +227,7 @@ void RecoveryManager::apply_undo(LogRecord *record) {
     switch (record->log_type_) {
         case LogType::INSERT: {
             auto *log = static_cast<InsertLogRecord *>(record);
-            redo_delete(std::string(log->table_name_, log->table_name_size_), log->rid_, log->insert_value_);
+            redo_delete(log->table_name_, log->rid_, log->insert_value_);
             break;
         }
         case LogType::DELETE: {

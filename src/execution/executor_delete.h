@@ -18,12 +18,13 @@ See the Mulan PSL v2 for more details. */
 
 class DeleteExecutor : public AbstractExecutor {
    private:
-    TabMeta tab_;                   // 表的元数据
+    TabMeta *tab_;                  // 表的元数据
     std::vector<Condition> conds_;  // delete的条件
     RmFileHandle *fh_;              // 表的数据文件句柄
     std::vector<Rid> rids_;         // 需要删除的记录的位置
     std::string tab_name_;          // 表名称
     SmManager *sm_manager_;
+    std::vector<IxIndexHandle *> index_handles_;
 
     [[noreturn]] void abort_mvcc_statement() {
         auto txn = context_ != nullptr ? context_->txn_ : nullptr;
@@ -41,31 +42,37 @@ class DeleteExecutor : public AbstractExecutor {
                    std::vector<Rid> rids, Context *context) {
         sm_manager_ = sm_manager;
         tab_name_ = tab_name;
-        tab_ = sm_manager_->db_.get_table(tab_name);
+        tab_ = &sm_manager_->db_.get_table(tab_name);
         fh_ = sm_manager_->fhs_.at(tab_name).get();
-        conds_ = conds;
-        rids_ = rids;
+        conds_ = std::move(conds);
+        rids_ = std::move(rids);
         context_ = context;
+        index_handles_.reserve(tab_->indexes.size());
+        for (auto &index : tab_->indexes) {
+            index_handles_.push_back(
+                sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get());
+        }
     }
 
     std::unique_ptr<RmRecord> Next() override {
         // 遍历 rids_，删除每条记录及其索引项
+        bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                    context_->txn_mgr_->IsMvccTxn(context_->txn_);
+        // RC 写者在有活跃 SI/SER 事务时也要保留旧版本并保留物理槽位（题目9 示例二）。
+        bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                              context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
+        bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
+                             (context_->txn_mgr_ == nullptr ||
+                              !context_->txn_mgr_->IsMvccTxn(context_->txn_));
         for (auto &rid : rids_) {
             // 获取记录以用于删除索引
-            bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
-            // RC 写者在有活跃 SI/SER 事务时也要保留旧版本并保留物理槽位（题目9 示例二）。
-            bool version_writes = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                                  context_->txn_mgr_->ShouldVersionWrites(context_->txn_);
-            bool use_2pl_locks = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
-                                 (context_->txn_mgr_ == nullptr ||
-                                  !context_->txn_mgr_->IsMvccTxn(context_->txn_));
             if (use_2pl_locks) {
                 context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid, fh_->GetFd());
             }
             std::unique_ptr<RmRecord> rec;
             try {
-                if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
+                if (context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                    context_->txn_mgr_->HasMvccState()) {
                     rec = context_->txn_mgr_->GetVisibleRecord(
                         tab_name_, rid, context_->txn_,
                         [&]() { return fh_->get_record(rid, context_); });
@@ -75,13 +82,10 @@ class DeleteExecutor : public AbstractExecutor {
             } catch (const RecordNotFoundError &) {
                 continue;
             }
-            if (mvcc) {
-                if (rec == nullptr) continue;
-                if (!eval_conds(rec->data, tab_.cols, conds_)) continue;
-            } else if (rec == nullptr) {
+            if (rec == nullptr) {
                 continue;
             }
-            if (!eval_conds(rec->data, tab_.cols, conds_)) {
+            if (!eval_conds(rec->data, tab_->cols, conds_)) {
                 continue;
             }
             if (mvcc) {
@@ -91,7 +95,8 @@ class DeleteExecutor : public AbstractExecutor {
             if (version_writes) {
                 context_->txn_mgr_->MvccDelete(tab_name_, rid, *rec, context_->txn_);
                 if (context_->txn_ != nullptr) {
-                    context_->txn_->append_write_record(new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec));
+                    context_->txn_->append_write_record(
+                        new WriteRecord(WType::DELETE_TUPLE, tab_name_, fh_->GetFd(), rid, *rec));
                     write_record_appended = true;
                 }
             }
@@ -104,10 +109,9 @@ class DeleteExecutor : public AbstractExecutor {
             std::vector<std::pair<IxIndexHandle *, std::vector<char>>> deleted_index_entries;
             try {
                 // 删除索引项
-                for (size_t i = 0; i < tab_.indexes.size(); ++i) {
-                    auto &index = tab_.indexes[i];
-                    auto ih = sm_manager_->ihs_.at(
-                        sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                for (size_t i = 0; i < tab_->indexes.size(); ++i) {
+                    auto &index = tab_->indexes[i];
+                    auto ih = index_handles_[i];
                     std::vector<char> key(index.col_tot_len);
                     int offset = 0;
                     for (int j = 0; j < index.col_num; ++j) {
@@ -123,7 +127,8 @@ class DeleteExecutor : public AbstractExecutor {
                     fh_->delete_record(rid, context_);
                 }
                 if (!write_record_appended && context_->txn_ != nullptr) {
-                    context_->txn_->append_write_record(new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec));
+                    context_->txn_->append_write_record(
+                        new WriteRecord(WType::DELETE_TUPLE, tab_name_, fh_->GetFd(), rid, *rec));
                 }
             } catch (TransactionAbortException &) {
                 throw;

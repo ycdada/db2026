@@ -62,7 +62,8 @@ public:
     ~TransactionManager();
 
     Transaction* begin(Transaction* txn, LogManager* log_manager,
-                       IsolationLevel isolation_level = IsolationLevel::READ_COMMITTED);
+                       IsolationLevel isolation_level = IsolationLevel::READ_COMMITTED,
+                       bool track_in_map = true);
 
     void commit(Transaction* txn, LogManager* log_manager);
 
@@ -137,6 +138,7 @@ public:
     // 当写者本身是 SI/SER，或当前存在活跃的 SI/SER 事务时，写操作必须保留旧版本，
     // 否则原地覆盖会破坏活跃快照（见题目9 示例二：T2 未 SET 仍不能毁掉 T1 的 SI 快照）。
     bool ShouldVersionWrites(Transaction *txn) const;
+    bool HasMvccState() const;
     std::string MvccKey(const std::string &tab_name, const Rid &rid) const;
     std::unique_ptr<RmRecord> GetVisibleRecord(const std::string &tab_name, const Rid &rid,
                                                const RmRecord &physical, Transaction *txn);
@@ -144,8 +146,11 @@ public:
                                                const std::function<std::unique_ptr<RmRecord>()> &fetch_physical);
     bool IsVisible(const std::string &tab_name, const Rid &rid, const RmRecord &physical, Transaction *txn);
     void RegisterPhysicalInsert(const std::string &tab_name, const Rid &rid, Transaction *txn);
+    void RegisterPhysicalInsert(int fd, const Rid &rid, Transaction *txn);
     void UnregisterPhysicalInsert(const std::string &tab_name, const Rid &rid, Transaction *txn);
+    void UnregisterPhysicalInsert(int fd, const Rid &rid, Transaction *txn);
     bool OwnsPhysicalInsert(const std::string &tab_name, const Rid &rid, Transaction *txn);
+    bool OwnsPhysicalInsert(int fd, const Rid &rid, Transaction *txn);
     std::vector<std::pair<Rid, RmRecord>> CollectVisibleVersionRecords(
         const std::string &tab_name, const std::vector<ColMeta> &cols, const std::vector<Condition> &conds,
         const std::set<std::pair<int, int>> &seen_rids, Transaction *txn);
@@ -190,6 +195,7 @@ private:
 
     std::atomic<timestamp_t> last_commit_ts_{0};    // 最后提交的时间戳,仅用于MVCC
     std::atomic<int> active_mvcc_txn_count_{0};
+    std::atomic<size_t> mvcc_entry_count_{0};
     std::atomic<uint64_t> gc_commit_counter_{0};
     Watermark running_txns_{0};             // 存储所有正在运行事务的读取时间戳，以便于垃圾回收，仅用于MVCC
 
@@ -232,7 +238,26 @@ private:
 
     std::mutex mvcc_latch_;
     std::mutex physical_insert_latch_;
-    std::unordered_map<std::string, txn_id_t> physical_insert_owners_;
+    struct PhysicalInsertKey {
+        int fd;
+        int page_no;
+        int slot_no;
+
+        bool operator==(const PhysicalInsertKey &other) const {
+            return fd == other.fd && page_no == other.page_no && slot_no == other.slot_no;
+        }
+    };
+
+    struct PhysicalInsertKeyHash {
+        size_t operator()(const PhysicalInsertKey &key) const {
+            size_t h = std::hash<int>{}(key.fd);
+            h = h * 1315423911U + std::hash<int>{}(key.page_no);
+            h = h * 1315423911U + std::hash<int>{}(key.slot_no);
+            return h;
+        }
+    };
+
+    std::unordered_map<PhysicalInsertKey, txn_id_t, PhysicalInsertKeyHash> physical_insert_owners_;
 	    std::unordered_map<std::string, MvccEntry> mvcc_versions_;
 	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_table_keys_;
 	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_index_compensation_keys_;
@@ -251,6 +276,8 @@ private:
 	                                                    bool include_fallback) const;
 	    bool RecordsConflictByLogicalKey(const TabMeta &tab, const RmRecord &lhs, const RmRecord &rhs,
 	                                     bool include_fallback) const;
+        PhysicalInsertKey MakePhysicalInsertKey(const std::string &tab_name, const Rid &rid) const;
+        PhysicalInsertKey MakePhysicalInsertKey(int fd, const Rid &rid) const;
 	    void MvccInsertLocked(const std::string &tab_name, const Rid &rid, const RmRecord &new_rec, Transaction *txn);
 	    void PrepareWriteLocked(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
 	                            Transaction *txn, bool inserted_record);

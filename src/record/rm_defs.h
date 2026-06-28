@@ -54,19 +54,62 @@ struct RmRecord {
 
     RmRecord(const RmRecord& other) {
         size = other.size;
-        data = new char[size];
-        memcpy(data, other.data, size);
-        allocated_ = true;
-    };
+        if (size > 0 && other.data != nullptr) {
+            data = new char[size];
+            memcpy(data, other.data, size);
+            allocated_ = true;
+        }
+    }
 
+    RmRecord(RmRecord&& other) noexcept {
+        data = other.data;
+        size = other.size;
+        allocated_ = other.allocated_;
+        other.data = nullptr;
+        other.size = 0;
+        other.allocated_ = false;
+    }
 
     RmRecord &operator=(const RmRecord& other) {
+        if (this == &other) {
+            return *this;
+        }
+        if (other.size <= 0 || other.data == nullptr) {
+            if (allocated_) {
+                delete[] data;
+            }
+            data = nullptr;
+            size = 0;
+            allocated_ = false;
+            return *this;
+        }
+        if (!allocated_ || size != other.size) {
+            if (allocated_) {
+                delete[] data;
+            }
+            data = new char[other.size];
+            allocated_ = true;
+        }
         size = other.size;
-        data = new char[size];
         memcpy(data, other.data, size);
-        allocated_ = true;
         return *this;
-    };
+    }
+
+    RmRecord &operator=(RmRecord&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        if (allocated_) {
+            delete[] data;
+        }
+        data = other.data;
+        size = other.size;
+        allocated_ = other.allocated_;
+        other.data = nullptr;
+        other.size = 0;
+        other.allocated_ = false;
+        return *this;
+    }
 
     RmRecord(int size_) {
         size = size_;

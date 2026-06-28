@@ -23,7 +23,6 @@ lsn_t LogManager::add_log_to_buffer(LogRecord* log_record) {
         if (log_buffer_.offset_ > 0) {
             disk_manager_->write_log(log_buffer_.buffer_, log_buffer_.offset_);
             persist_lsn_ = log_record->lsn_ - 1;
-            memset(log_buffer_.buffer_, 0, sizeof(log_buffer_.buffer_));
             log_buffer_.offset_ = 0;
         }
     }
@@ -42,7 +41,6 @@ void LogManager::flush_log_to_disk() {
     }
     disk_manager_->write_log(log_buffer_.buffer_, log_buffer_.offset_);
     persist_lsn_ = global_lsn_.load() - 1;
-    memset(log_buffer_.buffer_, 0, sizeof(log_buffer_.buffer_));
     log_buffer_.offset_ = 0;
 }
 

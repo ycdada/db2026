@@ -14,34 +14,41 @@ See the Mulan PSL v2 for more details. */
 #include "executor_abstract.h"
 #include "index/ix.h"
 #include "system/sm.h"
+#include <algorithm>
 
 class InsertExecutor : public AbstractExecutor {
    private:
-    TabMeta tab_;                   // 表的元数据
+    TabMeta *tab_;                  // 表的元数据
     std::vector<Value> values_;     // 需要插入的数据
     RmFileHandle *fh_;              // 表的数据文件句柄
     std::string tab_name_;          // 表名称
     Rid rid_;                       // 插入的位置，由于系统默认插入时不指定位置，因此当前rid_在插入后才赋值
     SmManager *sm_manager_;
+    std::vector<IxIndexHandle *> index_handles_;
 
    public:
     InsertExecutor(SmManager *sm_manager, const std::string &tab_name, std::vector<Value> values, Context *context) {
         sm_manager_ = sm_manager;
-        tab_ = sm_manager_->db_.get_table(tab_name);
-        values_ = values;
+        tab_ = &sm_manager_->db_.get_table(tab_name);
         tab_name_ = tab_name;
-        if (values.size() != tab_.cols.size()) {
+        if (values.size() != tab_->cols.size()) {
             throw InvalidValueCountError();
         }
+        values_ = std::move(values);
         fh_ = sm_manager_->fhs_.at(tab_name).get();
         context_ = context;
+        index_handles_.reserve(tab_->indexes.size());
+        for (auto &index : tab_->indexes) {
+            index_handles_.push_back(
+                sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get());
+        }
     };
 
     std::unique_ptr<RmRecord> Next() override {
         // Make record buffer
         RmRecord rec(fh_->get_file_hdr().record_size);
         for (size_t i = 0; i < values_.size(); i++) {
-            auto &col = tab_.cols[i];
+            auto &col = tab_->cols[i];
             auto &val = values_[i];
             if (col.type != val.type) {
                 if (col.type == TYPE_FLOAT && val.type == TYPE_INT) {
@@ -79,43 +86,52 @@ class InsertExecutor : public AbstractExecutor {
             rid_ = fh_->insert_record(rec.data, context_);
         }
         if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
-            context_->txn_mgr_->RegisterPhysicalInsert(tab_name_, rid_, context_->txn_);
+            context_->txn_mgr_->RegisterPhysicalInsert(fh_->GetFd(), rid_, context_->txn_);
         }
         bool write_record_appended = false;
         if (version_writes && context_->txn_ != nullptr) {
-            context_->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, rec));
+            context_->txn_->append_write_record(
+                new WriteRecord(WType::INSERT_TUPLE, tab_name_, fh_->GetFd(), rid_, rec));
             write_record_appended = true;
         }
         // Insert into index
         std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_index_entries;
+        int max_index_key_len = 0;
+        for (auto &index : tab_->indexes) {
+            max_index_key_len = std::max(max_index_key_len, index.col_tot_len);
+        }
+        std::vector<char> key_buf(max_index_key_len);
         try {
             if (use_2pl_locks) {
                 context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid_, fh_->GetFd());
             }
-            for(auto &index : tab_.indexes) {
-                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                std::vector<char> key(index.col_tot_len);
+            for (size_t idx = 0; idx < tab_->indexes.size(); ++idx) {
+                auto &index = tab_->indexes[idx];
+                auto ih = index_handles_[idx];
                 int offset = 0;
                 for(int i = 0; i < index.col_num; ++i) {
-                    memcpy(key.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
+                    memcpy(key_buf.data() + offset, rec.data + index.cols[i].offset, index.cols[i].len);
                     offset += index.cols[i].len;
                 }
-                if (ih->insert_entry(key.data(), rid_, context_->txn_) == IX_NO_PAGE) {
+                if (ih->insert_entry(key_buf.data(), rid_, context_->txn_) == IX_NO_PAGE) {
                     throw RMDBError("Duplicate key in unique index");
                 }
-                inserted_index_entries.emplace_back(ih, std::move(key));
+                if (idx + 1 < tab_->indexes.size()) {
+                    inserted_index_entries.emplace_back(
+                        ih, std::vector<char>(key_buf.data(), key_buf.data() + index.col_tot_len));
+                }
             }
         } catch (...) {
             for (auto &entry : inserted_index_entries) {
                 entry.first->delete_entry(entry.second.data(), context_ != nullptr ? context_->txn_ : nullptr);
             }
             bool owns_insert = context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                               context_->txn_mgr_->OwnsPhysicalInsert(tab_name_, rid_, context_->txn_);
+                               context_->txn_mgr_->OwnsPhysicalInsert(fh_->GetFd(), rid_, context_->txn_);
             if (owns_insert && fh_->is_record(rid_)) {
                 fh_->delete_record(rid_, context_);
             }
             if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
-                context_->txn_mgr_->UnregisterPhysicalInsert(tab_name_, rid_, context_->txn_);
+                context_->txn_mgr_->UnregisterPhysicalInsert(fh_->GetFd(), rid_, context_->txn_);
             }
             if (version_writes && context_ != nullptr && context_->txn_mgr_ != nullptr && context_->txn_ != nullptr &&
                 context_->txn_->get_state() != TransactionState::COMMITTED &&
@@ -131,7 +147,8 @@ class InsertExecutor : public AbstractExecutor {
             context_->txn_->set_prev_lsn(lsn);
         }
         if (!write_record_appended && context_->txn_ != nullptr) {
-            context_->txn_->append_write_record(new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, rec));
+            context_->txn_->append_write_record(
+                new WriteRecord(WType::INSERT_TUPLE, tab_name_, fh_->GetFd(), rid_, rec));
         }
         return nullptr;
     }
