@@ -21,22 +21,6 @@ namespace {
 
 constexpr size_t TXN_POOL_GRACE_SIZE = 64;
 
-void append_int(std::string &out, int value) {
-    char buf[16];
-    char *ptr = buf + sizeof(buf);
-    bool negative = value < 0;
-    unsigned int v = negative ? static_cast<unsigned int>(-(value + 1)) + 1U
-                              : static_cast<unsigned int>(value);
-    do {
-        *--ptr = static_cast<char>('0' + (v % 10));
-        v /= 10;
-    } while (v != 0);
-    if (negative) {
-        *--ptr = '-';
-    }
-    out.append(ptr, buf + sizeof(buf));
-}
-
 std::vector<char> make_index_key(const RmRecord &record, const IndexMeta &index) {
     std::vector<char> key(index.col_tot_len);
     int offset = 0;
@@ -277,18 +261,12 @@ bool TransactionManager::HasMvccState() const {
 }
 
 std::string TransactionManager::MvccKey(const std::string &tab_name, const Rid &rid) const {
-    std::string key;
-    key.reserve(tab_name.size() + 24);
-    key.append(tab_name);
-    key.push_back('#');
-    append_int(key, rid.page_no);
-    key.push_back('#');
-    append_int(key, rid.slot_no);
-    return key;
+    return tab_name + "#" + std::to_string(rid.page_no) + "#" + std::to_string(rid.slot_no);
 }
 
 TransactionManager::MvccEntry &TransactionManager::EnsureMvccEntryLocked(
-    const std::string &tab_name, const Rid &rid, const std::string &key, const RmRecord *physical) {
+    const std::string &tab_name, const Rid &rid, const RmRecord *physical) {
+    std::string key = MvccKey(tab_name, rid);
     auto [it, inserted] = mvcc_versions_.try_emplace(key);
     auto &entry = it->second;
     if (inserted) {
@@ -591,11 +569,11 @@ void TransactionManager::CheckMvccWriteConflict(const std::string &tab_name, con
     }
 }
 
-TransactionManager::MvccEntry &TransactionManager::PrepareWriteLocked(
-    const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
-    Transaction *txn, const std::string &key, bool inserted_record) {
+void TransactionManager::PrepareWriteLocked(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
+                                            Transaction *txn, bool inserted_record) {
+    std::string key = MvccKey(tab_name, rid);
     bool had_entry = mvcc_versions_.find(key) != mvcc_versions_.end();
-    auto &entry = EnsureMvccEntryLocked(tab_name, rid, key, inserted_record ? nullptr : &old_rec);
+    auto &entry = EnsureMvccEntryLocked(tab_name, rid, inserted_record ? nullptr : &old_rec);
     txn_id_t txn_id = txn->get_transaction_id();
 
     // 写写冲突 abort 仅对 SI/SER 写者生效（mirror SI WW rules）。RC 写者只保留旧版本、不 abort，
@@ -628,7 +606,6 @@ TransactionManager::MvccEntry &TransactionManager::PrepareWriteLocked(
             entry.undo_versions.emplace_back(old_rec, entry.is_deleted, entry.commit_ts, entry.writer_txn);
         }
     }
-    return entry;
 }
 
 bool TransactionManager::HasDangerousStructureLocked(txn_id_t pivot) const {
@@ -709,8 +686,8 @@ void TransactionManager::MvccInsertLocked(const std::string &tab_name, const Rid
                                           const RmRecord &new_rec, Transaction *txn) {
     RmRecord dummy(new_rec);
     CheckSerializableWriteLocked(tab_name, rid, nullptr, &new_rec, txn);
-    std::string key = MvccKey(tab_name, rid);
-    auto &entry = PrepareWriteLocked(tab_name, rid, dummy, txn, key, true);
+    PrepareWriteLocked(tab_name, rid, dummy, txn, true);
+    auto &entry = mvcc_versions_[MvccKey(tab_name, rid)];
     entry.exists = true;
     entry.is_deleted = false;
     entry.commit_ts = INVALID_TS;
@@ -843,8 +820,8 @@ void TransactionManager::MvccUpdate(const std::string &tab_name, const Rid &rid,
     if (!ShouldVersionWrites(txn)) return;
     std::scoped_lock<std::mutex> lock(mvcc_latch_);
     CheckSerializableWriteLocked(tab_name, rid, &old_rec, &new_rec, txn);
-    std::string key = MvccKey(tab_name, rid);
-    auto &entry = PrepareWriteLocked(tab_name, rid, old_rec, txn, key, false);
+    PrepareWriteLocked(tab_name, rid, old_rec, txn, false);
+    auto &entry = mvcc_versions_[MvccKey(tab_name, rid)];
     entry.exists = true;
     entry.is_deleted = false;
     entry.commit_ts = INVALID_TS;
@@ -854,7 +831,7 @@ void TransactionManager::MvccUpdate(const std::string &tab_name, const Rid &rid,
     entry.head_record = new_rec;
     const TabMeta &tab = sm_manager_->db_.get_table(tab_name);
     if (index_keys_changed(tab, old_rec, new_rec)) {
-        mvcc_index_compensation_keys_[tab_name].insert(key);
+        mvcc_index_compensation_keys_[tab_name].insert(MvccKey(tab_name, rid));
     }
 }
 
@@ -863,8 +840,8 @@ void TransactionManager::MvccDelete(const std::string &tab_name, const Rid &rid,
     if (!ShouldVersionWrites(txn)) return;
     std::scoped_lock<std::mutex> lock(mvcc_latch_);
     CheckSerializableWriteLocked(tab_name, rid, &old_rec, nullptr, txn);
-    std::string key = MvccKey(tab_name, rid);
-    auto &entry = PrepareWriteLocked(tab_name, rid, old_rec, txn, key, false);
+    PrepareWriteLocked(tab_name, rid, old_rec, txn, false);
+    auto &entry = mvcc_versions_[MvccKey(tab_name, rid)];
     entry.exists = true;
     entry.is_deleted = true;
     entry.commit_ts = INVALID_TS;
@@ -872,7 +849,7 @@ void TransactionManager::MvccDelete(const std::string &tab_name, const Rid &rid,
     entry.last_writer_txn = txn->get_transaction_id();
     entry.has_head_record = true;
     entry.head_record = old_rec;
-    mvcc_index_compensation_keys_[tab_name].insert(key);
+    mvcc_index_compensation_keys_[tab_name].insert(MvccKey(tab_name, rid));
 }
 
 void TransactionManager::RegisterSerializableRead(const std::string &tab_name, const std::vector<ColMeta> &cols,

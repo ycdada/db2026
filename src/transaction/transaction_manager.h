@@ -269,7 +269,7 @@ private:
 	    std::unordered_map<txn_id_t, timestamp_t> ser_txn_finish_ts_;
 
 	    MvccEntry &EnsureMvccEntryLocked(const std::string &tab_name, const Rid &rid,
-	                                     const std::string &key, const RmRecord *physical = nullptr);
+	                                     const RmRecord *physical = nullptr);
 	    std::optional<RmRecord> VisibleRecordLocked(const std::string &key, const MvccEntry &entry,
 	                                                const RmRecord &physical, Transaction *txn) const;
 	    std::vector<std::string> BuildMvccConflictKeys(const TabMeta &tab, const RmRecord &record,
@@ -279,8 +279,8 @@ private:
         PhysicalInsertKey MakePhysicalInsertKey(const std::string &tab_name, const Rid &rid) const;
         PhysicalInsertKey MakePhysicalInsertKey(int fd, const Rid &rid) const;
 	    void MvccInsertLocked(const std::string &tab_name, const Rid &rid, const RmRecord &new_rec, Transaction *txn);
-	    MvccEntry &PrepareWriteLocked(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
-	                                  Transaction *txn, const std::string &key, bool inserted_record);
+	    void PrepareWriteLocked(const std::string &tab_name, const Rid &rid, const RmRecord &old_rec,
+	                            Transaction *txn, bool inserted_record);
 	    void CheckSerializableWriteLocked(const std::string &tab_name, const Rid &rid,
 	                                      const RmRecord *old_rec, const RmRecord *new_rec, Transaction *txn);
 	    void AddRwEdgeLocked(txn_id_t reader, txn_id_t writer, Transaction *current_txn);
