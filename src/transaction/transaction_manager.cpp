@@ -13,7 +13,6 @@ See the Mulan PSL v2 for more details. */
 #include "system/sm_manager.h"
 
 #include <algorithm>
-#include <charconv>
 #include <unordered_set>
 
 std::unordered_map<txn_id_t, Transaction *> TransactionManager::txn_map = {};
@@ -24,10 +23,18 @@ constexpr size_t TXN_POOL_GRACE_SIZE = 64;
 
 void append_int(std::string &out, int value) {
     char buf[16];
-    auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
-    if (ec == std::errc()) {
-        out.append(buf, ptr);
+    char *ptr = buf + sizeof(buf);
+    bool negative = value < 0;
+    unsigned int v = negative ? static_cast<unsigned int>(-(value + 1)) + 1U
+                              : static_cast<unsigned int>(value);
+    do {
+        *--ptr = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    } while (v != 0);
+    if (negative) {
+        *--ptr = '-';
     }
+    out.append(ptr, buf + sizeof(buf));
 }
 
 std::vector<char> make_index_key(const RmRecord &record, const IndexMeta &index) {
