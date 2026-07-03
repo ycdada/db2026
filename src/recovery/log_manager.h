@@ -10,6 +10,8 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -353,19 +355,25 @@ public:
 /* 日志管理器，负责把日志写入日志缓冲区，以及把日志缓冲区中的内容写入磁盘中 */
 class LogManager {
 public:
-    LogManager(DiskManager* disk_manager) { disk_manager_ = disk_manager; persist_lsn_ = INVALID_LSN; }
+    LogManager(DiskManager* disk_manager)
+        : persist_lsn_(INVALID_LSN), disk_manager_(disk_manager), flush_buffer_(std::make_unique<LogBuffer>()) {}
 
     lsn_t add_log_to_buffer(LogRecord* log_record);
-    void flush_log_to_disk();
+    void flush_log_to_disk(lsn_t target_lsn = INVALID_LSN);
     lsn_t add_log_record(LogRecord* log_record) { return add_log_to_buffer(log_record); }
     static std::unique_ptr<LogRecord> deserialize_log_record(const char *src, int len);
 
     LogBuffer* get_log_buffer() { return &log_buffer_; }
 
 private:    
+    void flush_buffer_locked(std::unique_lock<std::mutex> &lock);
+
     std::atomic<lsn_t> global_lsn_{0};  // 全局lsn，递增，用于为每条记录分发lsn
     std::mutex latch_;                  // 用于对log_buffer_的互斥访问
+    std::condition_variable flush_cv_;
+    bool flush_in_progress_{false};
     LogBuffer log_buffer_;              // 日志缓冲区
     lsn_t persist_lsn_;                 // 记录已经持久化到磁盘中的最后一条日志的日志号
     DiskManager* disk_manager_;
+    std::unique_ptr<LogBuffer> flush_buffer_;  // 正在刷盘的日志批次副本
 }; 

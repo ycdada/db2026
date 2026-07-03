@@ -1037,7 +1037,7 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         CommitLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
         lsn_t lsn = log_manager->add_log_record(&log);
         txn->set_prev_lsn(lsn);
-        log_manager->flush_log_to_disk();
+        log_manager->flush_log_to_disk(lsn);
     }
 }
 
@@ -1163,7 +1163,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             AbortLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
             lsn_t lsn = log_manager->add_log_record(&log);
             txn->set_prev_lsn(lsn);
-            log_manager->flush_log_to_disk();
+            log_manager->flush_log_to_disk(lsn);
         }
         return;
     }
@@ -1224,6 +1224,6 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
         AbortLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
         lsn_t lsn = log_manager->add_log_record(&log);
         txn->set_prev_lsn(lsn);
-        log_manager->flush_log_to_disk();
+        log_manager->flush_log_to_disk(lsn);
     }
 }

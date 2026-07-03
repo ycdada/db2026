@@ -8,7 +8,9 @@ EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
+#include <algorithm>
 #include <cstring>
+#include "errors.h"
 #include "log_manager.h"
 
 /**
@@ -17,31 +19,75 @@ See the Mulan PSL v2 for more details. */
  * @return {lsn_t} 返回该日志的日志记录号
  */
 lsn_t LogManager::add_log_to_buffer(LogRecord* log_record) {
-    std::scoped_lock<std::mutex> lock(latch_);
-    log_record->lsn_ = global_lsn_.fetch_add(1);
-    if (log_buffer_.is_full(log_record->log_tot_len_)) {
-        if (log_buffer_.offset_ > 0) {
-            disk_manager_->write_log(log_buffer_.buffer_, log_buffer_.offset_);
-            persist_lsn_ = log_record->lsn_ - 1;
-            log_buffer_.offset_ = 0;
-        }
+    std::unique_lock<std::mutex> lock(latch_);
+    if (log_record->log_tot_len_ > LOG_BUFFER_SIZE) {
+        throw InternalError("Log record is larger than log buffer");
     }
+    while (log_buffer_.is_full(log_record->log_tot_len_)) {
+        flush_buffer_locked(lock);
+    }
+    log_record->lsn_ = global_lsn_.fetch_add(1);
     log_record->serialize(log_buffer_.buffer_ + log_buffer_.offset_);
     log_buffer_.offset_ += log_record->log_tot_len_;
     return log_record->lsn_;
 }
 
 /**
- * @description: 把日志缓冲区的内容刷到磁盘中，由于目前只设置了一个缓冲区，因此需要阻塞其他日志操作
+ * @description: 把当前日志缓冲区内容刷到磁盘。调用方必须持有latch_。
  */
-void LogManager::flush_log_to_disk() {
-    std::scoped_lock<std::mutex> lock(latch_);
+void LogManager::flush_buffer_locked(std::unique_lock<std::mutex> &lock) {
+    while (flush_in_progress_) {
+        flush_cv_.wait(lock);
+    }
     if (log_buffer_.offset_ == 0) {
         return;
     }
-    disk_manager_->write_log(log_buffer_.buffer_, log_buffer_.offset_);
-    persist_lsn_ = global_lsn_.load() - 1;
+
+    std::memcpy(flush_buffer_->buffer_, log_buffer_.buffer_, log_buffer_.offset_);
+    flush_buffer_->offset_ = log_buffer_.offset_;
+    lsn_t flush_lsn = global_lsn_.load(std::memory_order_acquire) - 1;
     log_buffer_.offset_ = 0;
+    flush_in_progress_ = true;
+
+    lock.unlock();
+    try {
+        disk_manager_->write_log(flush_buffer_->buffer_, flush_buffer_->offset_);
+    } catch (...) {
+        lock.lock();
+        flush_in_progress_ = false;
+        lock.unlock();
+        flush_cv_.notify_all();
+        throw;
+    }
+    lock.lock();
+
+    persist_lsn_ = std::max(persist_lsn_, flush_lsn);
+    flush_in_progress_ = false;
+    lock.unlock();
+    flush_cv_.notify_all();
+    lock.lock();
+}
+
+/**
+ * @description: 把日志缓冲区的内容刷到磁盘中。若指定target_lsn，则等待该LSN已持久化。
+ */
+void LogManager::flush_log_to_disk(lsn_t target_lsn) {
+    std::unique_lock<std::mutex> lock(latch_);
+    if (target_lsn == INVALID_LSN) {
+        flush_buffer_locked(lock);
+        return;
+    }
+
+    while (target_lsn > persist_lsn_) {
+        if (flush_in_progress_) {
+            flush_cv_.wait(lock);
+            continue;
+        }
+        if (log_buffer_.offset_ == 0) {
+            return;
+        }
+        flush_buffer_locked(lock);
+    }
 }
 
 std::unique_ptr<LogRecord> LogManager::deserialize_log_record(const char *src, int len) {
