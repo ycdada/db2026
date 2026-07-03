@@ -66,7 +66,7 @@ class RmFileHandle {
         bool header_loaded = false;
         bool records_loaded = false;
         size_t active_handles = 0;
-        std::unordered_map<int64_t, std::unique_ptr<RmRecord>> records;
+        std::unordered_map<int64_t, std::shared_ptr<RmRecord>> records;
     };
 
     std::shared_ptr<SharedRecordState> shared_state_;
@@ -119,6 +119,8 @@ class RmFileHandle {
     bool is_record(const Rid &rid) const;
 
     std::unique_ptr<RmRecord> get_record(const Rid &rid, Context *context) const;
+
+    std::shared_ptr<const RmRecord> get_record_handle(const Rid &rid, Context *context) const;
 
     Rid insert_record(char *buf, Context *context);
 

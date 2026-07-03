@@ -12,6 +12,7 @@ See the Mulan PSL v2 for more details. */
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <set>
 
 #include "execution_common.h"
@@ -44,6 +45,7 @@ class IndexScanExecutor : public AbstractExecutor {
     Rid rid_;
     std::unique_ptr<RecScan> scan_;
     std::unique_ptr<RmRecord> cur_rec_;
+    std::shared_ptr<const RmRecord> cur_rec_handle_;
     std::vector<std::pair<Rid, RmRecord>> extra_records_;
     size_t extra_pos_ = 0;
     bool extra_loaded_ = false;
@@ -89,6 +91,7 @@ class IndexScanExecutor : public AbstractExecutor {
         }
         rid_ = extra_records_[extra_pos_].first;
         cur_rec_ = std::make_unique<RmRecord>(extra_records_[extra_pos_].second);
+        cur_rec_handle_.reset();
         returned_rids_.push_back(rid_);
         end_ = false;
         return true;
@@ -100,20 +103,29 @@ class IndexScanExecutor : public AbstractExecutor {
             context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid, fh_->GetFd());
         }
         std::unique_ptr<RmRecord> rec;
+        std::shared_ptr<const RmRecord> rec_handle;
+        const char *rec_data = nullptr;
         try {
             if (context_ != nullptr && context_->txn_mgr_ != nullptr &&
                 context_->txn_mgr_->HasMvccState()) {
                 rec = context_->txn_mgr_->GetVisibleRecord(
                     tab_name_, rid, context_->txn_,
                     [&]() { return fh_->get_record(rid, context_); });
+                if (rec != nullptr) {
+                    rec_data = rec->data;
+                }
             } else {
-                rec = fh_->get_record(rid, context_);
+                rec_handle = fh_->get_record_handle(rid, context_);
+                if (rec_handle != nullptr) {
+                    rec_data = rec_handle->data;
+                }
             }
         } catch (const RecordNotFoundError &) {
             return false;
         }
-        if (rec != nullptr && eval_conds(rec->data, cols_, fed_conds_)) {
+        if (rec_data != nullptr && eval_conds(rec_data, cols_, fed_conds_)) {
             cur_rec_ = std::move(rec);
+            cur_rec_handle_ = std::move(rec_handle);
             rid_ = rid;
             returned_rids_.push_back(rid_);
             end_ = false;
@@ -169,6 +181,7 @@ class IndexScanExecutor : public AbstractExecutor {
 
     void advance_to_next_match() {
         cur_rec_ = nullptr;
+        cur_rec_handle_.reset();
         if (using_point_lookup_) {
             if (load_next_point()) {
                 return;
@@ -281,6 +294,7 @@ class IndexScanExecutor : public AbstractExecutor {
             if (!join_key_bound_) {
                 scan_ = nullptr;
                 cur_rec_ = nullptr;
+                cur_rec_handle_.reset();
                 extra_records_.clear();
                 extra_pos_ = 0;
                 extra_loaded_ = false;
@@ -307,6 +321,7 @@ class IndexScanExecutor : public AbstractExecutor {
         extra_pos_ = 0;
         extra_loaded_ = false;
         cur_rec_ = nullptr;
+        cur_rec_handle_.reset();
         end_ = true;
         using_point_lookup_ = false;
         point_has_rid_ = false;
@@ -392,6 +407,7 @@ class IndexScanExecutor : public AbstractExecutor {
                     return;
                 }
                 cur_rec_ = nullptr;
+                cur_rec_handle_.reset();
                 end_ = true;
                 register_ser_read_once();
                 return;
@@ -411,22 +427,25 @@ class IndexScanExecutor : public AbstractExecutor {
             }
         }
         cur_rec_ = nullptr;
+        cur_rec_handle_.reset();
         end_ = true;
         register_ser_read_once();
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        if (end_ || cur_rec_ == nullptr) return nullptr;
+        if (end_ || (cur_rec_ == nullptr && cur_rec_handle_ == nullptr)) return nullptr;
         rows_++;
-        return std::make_unique<RmRecord>(*cur_rec_);
+        return cur_rec_ != nullptr ? std::make_unique<RmRecord>(*cur_rec_)
+                                   : std::make_unique<RmRecord>(*cur_rec_handle_);
     }
 
     size_t NextBatch(std::vector<std::unique_ptr<RmRecord>> &batch, size_t max_batch_size) override {
         batch.clear();
         while (batch.size() < max_batch_size && !end_) {
-            if (cur_rec_ != nullptr) {
+            if (cur_rec_ != nullptr || cur_rec_handle_ != nullptr) {
                 rows_++;
-                batch.push_back(std::make_unique<RmRecord>(*cur_rec_));
+                batch.push_back(cur_rec_ != nullptr ? std::make_unique<RmRecord>(*cur_rec_)
+                                                    : std::make_unique<RmRecord>(*cur_rec_handle_));
             }
             nextTuple();
         }

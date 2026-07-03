@@ -776,6 +776,41 @@ TEST(RecordManagerTest, MultipleHandlesShareRecordCache) {
     rm_manager->destroy_file(filename);
 }
 
+TEST(RecordManagerTest, RecordHandleStaysStableAcrossUpdateAndDelete) {
+    auto disk_manager = std::make_unique<DiskManager>();
+    auto buffer_pool_manager = std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, disk_manager.get());
+    auto rm_manager = std::make_unique<RmManager>(disk_manager.get(), buffer_pool_manager.get());
+
+    std::string filename = "stable_record_handle.txt";
+    if (disk_manager->is_file(filename)) {
+        disk_manager->destroy_file(filename);
+    }
+    rm_manager->create_file(filename, sizeof(int));
+    auto file_handle = rm_manager->open_file(filename);
+
+    int value = 10;
+    Rid rid = file_handle->insert_record(reinterpret_cast<char *>(&value), nullptr);
+    auto old_handle = file_handle->get_record_handle(rid, nullptr);
+    ASSERT_NE(old_handle, nullptr);
+    EXPECT_EQ(*reinterpret_cast<const int *>(old_handle->data), value);
+
+    int updated_value = 20;
+    file_handle->update_record(rid, reinterpret_cast<char *>(&updated_value), nullptr);
+    auto new_handle = file_handle->get_record_handle(rid, nullptr);
+    ASSERT_NE(new_handle, nullptr);
+    EXPECT_EQ(*reinterpret_cast<const int *>(old_handle->data), value);
+    EXPECT_EQ(*reinterpret_cast<const int *>(new_handle->data), updated_value);
+
+    file_handle->delete_record(rid, nullptr);
+    EXPECT_EQ(*reinterpret_cast<const int *>(old_handle->data), value);
+    EXPECT_EQ(*reinterpret_cast<const int *>(new_handle->data), updated_value);
+    EXPECT_THROW(file_handle->get_record_handle(rid, nullptr), RecordNotFoundError);
+
+    rm_manager->close_file(file_handle.get());
+    file_handle.reset();
+    rm_manager->destroy_file(filename);
+}
+
 TEST(RecordManagerTest, ClosingOneHandleKeepsOtherHandleCache) {
     auto disk_manager = std::make_unique<DiskManager>();
     auto buffer_pool_manager = std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, disk_manager.get());

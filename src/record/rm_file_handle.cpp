@@ -56,6 +56,17 @@ std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid& rid, Context* cont
     return std::make_unique<RmRecord>(*mem_it->second);
 }
 
+std::shared_ptr<const RmRecord> RmFileHandle::get_record_handle(const Rid& rid, Context* context) const {
+    std::shared_lock<std::shared_mutex> handle_guard(latch_);
+    ensure_open_locked();
+    std::shared_lock<std::shared_mutex> guard(shared_state_->latch);
+    auto mem_it = shared_state_->records.find(memory_key(rid));
+    if (mem_it == shared_state_->records.end()) {
+        throw RecordNotFoundError(rid.page_no, rid.slot_no);
+    }
+    return mem_it->second;
+}
+
 /**
  * @description: 在当前表中插入一条记录，不指定插入位置
  * @param {char*} buf 要插入的记录的数据
@@ -84,7 +95,7 @@ Rid RmFileHandle::insert_record(char* buf, Context* context) {
     }
     page_id_t page_no = page_handle.page->get_page_id().page_no;
     shared_state_->records[memory_key(Rid{page_no, slot_no})] =
-        std::make_unique<RmRecord>(file_hdr_.record_size, buf);
+        std::make_shared<RmRecord>(file_hdr_.record_size, buf);
     shared_state_->file_hdr = file_hdr_;
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
@@ -119,7 +130,7 @@ void RmFileHandle::insert_record(const Rid& rid, char* buf) {
     if (page_handle.page_hdr->num_records == file_hdr_.num_records_per_page) {
         remove_page_from_free_list(page_handle);
     }
-    shared_state_->records[memory_key(rid)] = std::make_unique<RmRecord>(file_hdr_.record_size, buf);
+    shared_state_->records[memory_key(rid)] = std::make_shared<RmRecord>(file_hdr_.record_size, buf);
     shared_state_->file_hdr = file_hdr_;
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
@@ -177,13 +188,7 @@ void RmFileHandle::update_record(const Rid& rid, char* buf, Context* context) {
     // 2. 更新记录
     char *slot = page_handle.get_slot(rid.slot_no);
     memcpy(slot, buf, file_hdr_.record_size);
-    auto mem_key = memory_key(rid);
-    auto mem_it = shared_state_->records.find(mem_key);
-    if (mem_it != shared_state_->records.end()) {
-        mem_it->second->SetData(buf);
-    } else {
-        shared_state_->records[mem_key] = std::make_unique<RmRecord>(file_hdr_.record_size, buf);
-    }
+    shared_state_->records[memory_key(rid)] = std::make_shared<RmRecord>(file_hdr_.record_size, buf);
     shared_state_->file_hdr = file_hdr_;
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
@@ -338,7 +343,7 @@ void RmFileHandle::load_memory_records() {
         for (int slot_no = 0; slot_no < file_hdr_.num_records_per_page; ++slot_no) {
             if (Bitmap::is_set(page_handle.bitmap, slot_no)) {
                 shared_state_->records[memory_key(Rid{page_no, slot_no})] =
-                    std::make_unique<RmRecord>(file_hdr_.record_size, page_handle.get_slot(slot_no));
+                    std::make_shared<RmRecord>(file_hdr_.record_size, page_handle.get_slot(slot_no));
             }
         }
         buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
