@@ -37,6 +37,7 @@ struct TabCol {
 
 struct Value {
     ColType type;  // type of value
+    int param_id = -1;
     union {
         int int_val;      // int value
         float float_val;  // float value

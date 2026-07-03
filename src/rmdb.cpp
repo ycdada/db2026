@@ -14,15 +14,21 @@ See the Mulan PSL v2 for more details. */
 #include <setjmp.h>
 #include <signal.h>
 #include <unistd.h>
+#include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 #include "errors.h"
 #include "optimizer/optimizer.h"
 #include "recovery/log_recovery.h"
@@ -71,9 +77,141 @@ struct CachedPlan {
     std::shared_ptr<Plan> plan;
 };
 
+struct TemplateLiteral {
+    bool is_string = false;
+    std::string raw;
+    std::string display;
+};
+
+struct SqlTemplate {
+    bool ok = false;
+    std::string key;
+    std::vector<TemplateLiteral> literals;
+};
+
+struct TemplateValueSpec {
+    ColType type = TYPE_INT;
+    int raw_len = 0;
+    bool initialized = false;
+};
+
+struct CachedTemplatePlan {
+    uint64_t version;
+    std::shared_ptr<Plan> plan;
+    std::vector<TemplateValueSpec> specs;
+};
+
 std::mutex plan_cache_latch;
 std::unordered_map<std::string, CachedPlan> plan_cache;
+std::unordered_map<std::string, CachedTemplatePlan> template_plan_cache;
 std::atomic<uint64_t> plan_cache_version{0};
+
+bool is_word_char(char ch) {
+    return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
+}
+
+void append_normalized_token(std::string &out, std::string_view token, bool word_token) {
+    if (token.empty()) {
+        return;
+    }
+    if (word_token && !out.empty() && is_word_char(out.back())) {
+        out.push_back(' ');
+    }
+    out.append(token.data(), token.size());
+}
+
+bool sign_belongs_to_number(std::string_view sql, size_t pos) {
+    if (pos + 1 >= sql.size() || !std::isdigit(static_cast<unsigned char>(sql[pos + 1]))) {
+        return false;
+    }
+    size_t prev = pos;
+    while (prev > 0) {
+        --prev;
+        if (!std::isspace(static_cast<unsigned char>(sql[prev]))) {
+            char ch = sql[prev];
+            return ch == '(' || ch == ',' || ch == '=' || ch == '<' || ch == '>' || ch == '!';
+        }
+    }
+    return true;
+}
+
+SqlTemplate build_sql_template(std::string_view sql) {
+    SqlTemplate result;
+    if (!sql.empty() && sql.back() == ';') {
+        sql.remove_suffix(1);
+    }
+    size_t i = 0;
+    while (i < sql.size()) {
+        unsigned char ch = static_cast<unsigned char>(sql[i]);
+        if (std::isspace(ch)) {
+            ++i;
+            continue;
+        }
+        if (std::isalpha(ch) || sql[i] == '_') {
+            size_t begin = i;
+            while (i < sql.size() && is_word_char(sql[i])) {
+                ++i;
+            }
+            std::string word(sql.substr(begin, i - begin));
+            std::transform(word.begin(), word.end(), word.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            append_normalized_token(result.key, word, true);
+            continue;
+        }
+        if (std::isdigit(ch) || ((sql[i] == '+' || sql[i] == '-') && sign_belongs_to_number(sql, i))) {
+            size_t begin = i;
+            if (sql[i] == '+' || sql[i] == '-') {
+                ++i;
+            }
+            while (i < sql.size() && std::isdigit(static_cast<unsigned char>(sql[i]))) {
+                ++i;
+            }
+            if (i < sql.size() && sql[i] == '.') {
+                ++i;
+                while (i < sql.size() && std::isdigit(static_cast<unsigned char>(sql[i]))) {
+                    ++i;
+                }
+            }
+            TemplateLiteral literal;
+            literal.raw.assign(sql.data() + begin, i - begin);
+            literal.display = literal.raw;
+            result.literals.push_back(std::move(literal));
+            append_normalized_token(result.key, "?", true);
+            continue;
+        }
+        if (sql[i] == '\'') {
+            size_t begin = i;
+            ++i;
+            while (i < sql.size() && sql[i] != '\'') {
+                ++i;
+            }
+            if (i >= sql.size()) {
+                return result;
+            }
+            TemplateLiteral literal;
+            literal.is_string = true;
+            literal.raw.assign(sql.data() + begin + 1, i - begin - 1);
+            literal.display.assign(sql.data() + begin, i - begin + 1);
+            result.literals.push_back(std::move(literal));
+            ++i;
+            append_normalized_token(result.key, "?", true);
+            continue;
+        }
+        if (i + 1 < sql.size()) {
+            std::string_view two(sql.data() + i, 2);
+            if (two == ">=" || two == "<=" || two == "<>" || two == "!=") {
+                append_normalized_token(result.key, two, false);
+                i += 2;
+                continue;
+            }
+        }
+        append_normalized_token(result.key, std::string_view(sql.data() + i, 1), false);
+        ++i;
+    }
+    result.ok = true;
+    return result;
+}
 
 bool plan_needs_transaction(const std::shared_ptr<Plan> &plan) {
     if (auto other = std::dynamic_pointer_cast<OtherPlan>(plan)) {
@@ -113,6 +251,7 @@ uint64_t current_plan_cache_version() {
 void invalidate_plan_cache() {
     std::lock_guard<std::mutex> lock(plan_cache_latch);
     plan_cache.clear();
+    template_plan_cache.clear();
     plan_cache_version.fetch_add(1, std::memory_order_acq_rel);
 }
 
@@ -142,6 +281,446 @@ void store_cached_plan(const std::string &sql, const std::shared_ptr<Plan> &plan
         plan_cache.erase(plan_cache.begin());
     }
     plan_cache[sql] = CachedPlan{planned_version, plan};
+}
+
+void assign_expr_params(const std::shared_ptr<ast::Expr> &expr, int &next_param);
+
+void assign_condition_params(const std::shared_ptr<ast::BinaryExpr> &cond, int &next_param) {
+    if (cond == nullptr) {
+        return;
+    }
+    assign_expr_params(cond->rhs, next_param);
+}
+
+void assign_having_params(const std::shared_ptr<ast::HavingExpr> &cond, int &next_param) {
+    if (cond == nullptr) {
+        return;
+    }
+    assign_expr_params(cond->lhs, next_param);
+    assign_expr_params(cond->rhs, next_param);
+}
+
+void assign_expr_params(const std::shared_ptr<ast::Expr> &expr, int &next_param) {
+    if (expr == nullptr) {
+        return;
+    }
+    if (auto value = std::dynamic_pointer_cast<ast::Value>(expr)) {
+        value->param_id = next_param++;
+    } else if (auto arith = std::dynamic_pointer_cast<ast::ArithmeticExpr>(expr)) {
+        assign_expr_params(arith->rhs, next_param);
+    }
+}
+
+void assign_select_params(const std::shared_ptr<ast::SelectStmt> &select, int &next_param) {
+    if (select == nullptr) {
+        return;
+    }
+    for (auto &cond : select->conds) {
+        assign_condition_params(cond, next_param);
+    }
+    for (auto &cond : select->having_conds) {
+        assign_having_params(cond, next_param);
+    }
+    for (auto &ref : select->from_refs) {
+        if (ref != nullptr && ref->is_derived) {
+            if (auto derived_select = std::dynamic_pointer_cast<ast::SelectStmt>(ref->derived_query)) {
+                assign_select_params(derived_select, next_param);
+            } else if (auto derived_union = std::dynamic_pointer_cast<ast::UnionStmt>(ref->derived_query)) {
+                for (auto &branch : derived_union->branches) {
+                    if (auto branch_select = std::dynamic_pointer_cast<ast::SelectStmt>(branch)) {
+                        assign_select_params(branch_select, next_param);
+                    }
+                }
+            }
+        }
+    }
+}
+
+int assign_template_param_ids(const std::shared_ptr<ast::TreeNode> &root) {
+    int next_param = 0;
+    auto assign_root = [&](const std::shared_ptr<ast::TreeNode> &node, auto &&assign_root_ref) -> void {
+        if (auto insert = std::dynamic_pointer_cast<ast::InsertStmt>(node)) {
+            for (auto &value : insert->vals) {
+                if (value != nullptr) {
+                    value->param_id = next_param++;
+                }
+            }
+        } else if (auto update = std::dynamic_pointer_cast<ast::UpdateStmt>(node)) {
+            for (auto &set_clause : update->set_clauses) {
+                if (set_clause != nullptr) {
+                    assign_expr_params(set_clause->rhs, next_param);
+                }
+            }
+            for (auto &cond : update->conds) {
+                assign_condition_params(cond, next_param);
+            }
+        } else if (auto del = std::dynamic_pointer_cast<ast::DeleteStmt>(node)) {
+            for (auto &cond : del->conds) {
+                assign_condition_params(cond, next_param);
+            }
+        } else if (auto select = std::dynamic_pointer_cast<ast::SelectStmt>(node)) {
+            assign_select_params(select, next_param);
+        } else if (auto union_stmt = std::dynamic_pointer_cast<ast::UnionStmt>(node)) {
+            for (auto &branch : union_stmt->branches) {
+                assign_root_ref(branch, assign_root_ref);
+            }
+        }
+    };
+    assign_root(root, assign_root);
+    return next_param;
+}
+
+void merge_value_spec(const Value &value, std::vector<TemplateValueSpec> &specs) {
+    if (value.param_id < 0) {
+        return;
+    }
+    if (static_cast<size_t>(value.param_id) >= specs.size()) {
+        specs.resize(value.param_id + 1);
+    }
+    auto &spec = specs[value.param_id];
+    int raw_len = value.raw != nullptr ? value.raw->size : 0;
+    if (!spec.initialized) {
+        spec.type = value.type;
+        spec.raw_len = raw_len;
+        spec.initialized = true;
+        return;
+    }
+    if (spec.type != value.type) {
+        spec.initialized = false;
+        return;
+    }
+    if (spec.raw_len == 0) {
+        spec.raw_len = raw_len;
+    } else if (raw_len != 0 && spec.raw_len != raw_len) {
+        spec.initialized = false;
+    }
+}
+
+void collect_condition_specs(const std::vector<Condition> &conds, std::vector<TemplateValueSpec> &specs) {
+    for (auto &cond : conds) {
+        if (cond.is_rhs_val) {
+            merge_value_spec(cond.rhs_val, specs);
+        }
+    }
+}
+
+void collect_having_specs(const std::vector<AggHavingCond> &conds, std::vector<TemplateValueSpec> &specs) {
+    auto collect_term = [&](const AggTerm &term) {
+        if (term.kind == AGG_TERM_VALUE) {
+            merge_value_spec(term.val, specs);
+        }
+    };
+    for (auto &cond : conds) {
+        collect_term(cond.lhs);
+        collect_term(cond.rhs);
+    }
+}
+
+void collect_plan_specs(const std::shared_ptr<Plan> &plan, std::vector<TemplateValueSpec> &specs) {
+    if (plan == nullptr) {
+        return;
+    }
+    if (auto x = std::dynamic_pointer_cast<DMLPlan>(plan)) {
+        for (auto &value : x->values_) {
+            merge_value_spec(value, specs);
+        }
+        collect_condition_specs(x->conds_, specs);
+        for (auto &set_clause : x->set_clauses_) {
+            merge_value_spec(set_clause.rhs, specs);
+        }
+        collect_plan_specs(x->subplan_, specs);
+    } else if (auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
+        collect_condition_specs(x->conds_, specs);
+    } else if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
+        collect_plan_specs(x->left_, specs);
+        collect_plan_specs(x->right_, specs);
+        collect_condition_specs(x->conds_, specs);
+    } else if (auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
+        collect_plan_specs(x->subplan_, specs);
+    } else if (auto x = std::dynamic_pointer_cast<FilterPlan>(plan)) {
+        collect_plan_specs(x->subplan_, specs);
+        collect_condition_specs(x->conds_, specs);
+    } else if (auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
+        collect_plan_specs(x->subplan_, specs);
+    } else if (auto x = std::dynamic_pointer_cast<RenamePlan>(plan)) {
+        collect_plan_specs(x->subplan_, specs);
+    } else if (auto x = std::dynamic_pointer_cast<UnionPlan>(plan)) {
+        for (auto &child : x->children_) {
+            collect_plan_specs(child, specs);
+        }
+    } else if (auto x = std::dynamic_pointer_cast<AggregatePlan>(plan)) {
+        collect_plan_specs(x->subplan_, specs);
+        collect_having_specs(x->having_conds_, specs);
+    } else if (auto x = std::dynamic_pointer_cast<LimitPlan>(plan)) {
+        collect_plan_specs(x->subplan_, specs);
+    }
+}
+
+std::shared_ptr<Plan> clone_plan(const std::shared_ptr<Plan> &plan) {
+    if (plan == nullptr) {
+        return nullptr;
+    }
+    if (auto x = std::dynamic_pointer_cast<DMLPlan>(plan)) {
+        return std::make_shared<DMLPlan>(x->tag, clone_plan(x->subplan_), x->tab_name_,
+                                         x->values_, x->conds_, x->set_clauses_);
+    }
+    if (auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
+        return std::make_shared<ScanPlan>(*x);
+    }
+    if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
+        return std::make_shared<JoinPlan>(x->tag, clone_plan(x->left_), clone_plan(x->right_), x->conds_);
+    }
+    if (auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
+        return std::make_shared<ProjectionPlan>(x->tag, clone_plan(x->subplan_), x->sel_cols_, x->is_star_);
+    }
+    if (auto x = std::dynamic_pointer_cast<FilterPlan>(plan)) {
+        return std::make_shared<FilterPlan>(clone_plan(x->subplan_), x->conds_);
+    }
+    if (auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
+        return std::make_shared<SortPlan>(x->tag, clone_plan(x->subplan_), x->order_bys_);
+    }
+    if (auto x = std::dynamic_pointer_cast<RenamePlan>(plan)) {
+        return std::make_shared<RenamePlan>(clone_plan(x->subplan_), x->cols_);
+    }
+    if (auto x = std::dynamic_pointer_cast<UnionPlan>(plan)) {
+        std::vector<std::shared_ptr<Plan>> children;
+        children.reserve(x->children_.size());
+        for (auto &child : x->children_) {
+            children.push_back(clone_plan(child));
+        }
+        return std::make_shared<UnionPlan>(std::move(children), x->output_cols_);
+    }
+    if (auto x = std::dynamic_pointer_cast<AggregatePlan>(plan)) {
+        return std::make_shared<AggregatePlan>(clone_plan(x->subplan_), x->select_terms_, x->agg_calls_,
+                                               x->group_cols_, x->having_conds_);
+    }
+    if (auto x = std::dynamic_pointer_cast<LimitPlan>(plan)) {
+        return std::make_shared<LimitPlan>(clone_plan(x->subplan_), x->limit_);
+    }
+    return nullptr;
+}
+
+bool parse_integer_literal(const std::string &raw, int &out) {
+    errno = 0;
+    char *end = nullptr;
+    long value = std::strtol(raw.c_str(), &end, 10);
+    if (errno != 0 || end == raw.c_str() || *end != '\0' ||
+        value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max()) {
+        return false;
+    }
+    out = static_cast<int>(value);
+    return true;
+}
+
+bool parse_float_literal(const std::string &raw, float &out) {
+    errno = 0;
+    char *end = nullptr;
+    float value = std::strtof(raw.c_str(), &end);
+    if (errno != 0 || end == raw.c_str() || *end != '\0') {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+bool make_bound_value(const TemplateLiteral &literal, const TemplateValueSpec &spec, Value &out) {
+    out.param_id = -1;
+    out.raw = nullptr;
+    if (spec.type == TYPE_STRING) {
+        if (!literal.is_string) {
+            return false;
+        }
+        out.set_str(literal.raw);
+    } else if (spec.type == TYPE_INT) {
+        if (literal.is_string) {
+            return false;
+        }
+        int int_value = 0;
+        if (!parse_integer_literal(literal.raw, int_value)) {
+            float float_value = 0;
+            if (!parse_float_literal(literal.raw, float_value)) {
+                return false;
+            }
+            int_value = static_cast<int>(float_value);
+        }
+        out.set_int(int_value);
+    } else if (spec.type == TYPE_FLOAT) {
+        if (literal.is_string) {
+            return false;
+        }
+        float float_value = 0;
+        if (!parse_float_literal(literal.raw, float_value)) {
+            return false;
+        }
+        out.set_float(float_value);
+    } else {
+        return false;
+    }
+    if (spec.raw_len > 0) {
+        out.init_raw(spec.raw_len);
+    }
+    return true;
+}
+
+bool bind_value(Value &value, const std::vector<TemplateValueSpec> &specs,
+                const std::vector<TemplateLiteral> &literals) {
+    if (value.param_id < 0) {
+        return true;
+    }
+    size_t idx = static_cast<size_t>(value.param_id);
+    if (idx >= specs.size() || idx >= literals.size() || !specs[idx].initialized) {
+        return false;
+    }
+    Value bound;
+    if (!make_bound_value(literals[idx], specs[idx], bound)) {
+        return false;
+    }
+    bound.param_id = value.param_id;
+    value = std::move(bound);
+    return true;
+}
+
+bool bind_conditions(std::vector<Condition> &conds, const std::vector<TemplateValueSpec> &specs,
+                     const std::vector<TemplateLiteral> &literals) {
+    for (auto &cond : conds) {
+        if (cond.is_rhs_val && cond.rhs_val.param_id >= 0) {
+            size_t idx = static_cast<size_t>(cond.rhs_val.param_id);
+            if (idx >= literals.size() || !bind_value(cond.rhs_val, specs, literals)) {
+                return false;
+            }
+            cond.rhs_raw = literals[idx].display;
+        }
+    }
+    return true;
+}
+
+bool bind_having(std::vector<AggHavingCond> &conds, const std::vector<TemplateValueSpec> &specs,
+                 const std::vector<TemplateLiteral> &literals) {
+    auto bind_term = [&](AggTerm &term) {
+        return term.kind != AGG_TERM_VALUE || bind_value(term.val, specs, literals);
+    };
+    for (auto &cond : conds) {
+        if (!bind_term(cond.lhs) || !bind_term(cond.rhs)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool bind_plan_params(const std::shared_ptr<Plan> &plan, const std::vector<TemplateValueSpec> &specs,
+                      const std::vector<TemplateLiteral> &literals) {
+    if (plan == nullptr) {
+        return true;
+    }
+    if (auto x = std::dynamic_pointer_cast<DMLPlan>(plan)) {
+        for (auto &value : x->values_) {
+            if (!bind_value(value, specs, literals)) {
+                return false;
+            }
+        }
+        if (!bind_conditions(x->conds_, specs, literals)) {
+            return false;
+        }
+        for (auto &set_clause : x->set_clauses_) {
+            if (!bind_value(set_clause.rhs, specs, literals)) {
+                return false;
+            }
+        }
+        return bind_plan_params(x->subplan_, specs, literals);
+    }
+    if (auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
+        return bind_conditions(x->conds_, specs, literals);
+    }
+    if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
+        return bind_plan_params(x->left_, specs, literals) &&
+               bind_plan_params(x->right_, specs, literals) &&
+               bind_conditions(x->conds_, specs, literals);
+    }
+    if (auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
+        return bind_plan_params(x->subplan_, specs, literals);
+    }
+    if (auto x = std::dynamic_pointer_cast<FilterPlan>(plan)) {
+        return bind_plan_params(x->subplan_, specs, literals) &&
+               bind_conditions(x->conds_, specs, literals);
+    }
+    if (auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
+        return bind_plan_params(x->subplan_, specs, literals);
+    }
+    if (auto x = std::dynamic_pointer_cast<RenamePlan>(plan)) {
+        return bind_plan_params(x->subplan_, specs, literals);
+    }
+    if (auto x = std::dynamic_pointer_cast<UnionPlan>(plan)) {
+        for (auto &child : x->children_) {
+            if (!bind_plan_params(child, specs, literals)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (auto x = std::dynamic_pointer_cast<AggregatePlan>(plan)) {
+        return bind_plan_params(x->subplan_, specs, literals) &&
+               bind_having(x->having_conds_, specs, literals);
+    }
+    if (auto x = std::dynamic_pointer_cast<LimitPlan>(plan)) {
+        return bind_plan_params(x->subplan_, specs, literals);
+    }
+    return false;
+}
+
+std::shared_ptr<Plan> lookup_template_plan(const SqlTemplate &sql_template) {
+    if (!sql_template.ok || sql_template.literals.empty()) {
+        return nullptr;
+    }
+    CachedTemplatePlan cached;
+    uint64_t version = current_plan_cache_version();
+    {
+        std::lock_guard<std::mutex> lock(plan_cache_latch);
+        auto it = template_plan_cache.find(sql_template.key);
+        if (it == template_plan_cache.end()) {
+            return nullptr;
+        }
+        if (it->second.version != version) {
+            template_plan_cache.erase(it);
+            return nullptr;
+        }
+        if (it->second.specs.size() != sql_template.literals.size()) {
+            return nullptr;
+        }
+        cached = it->second;
+    }
+    auto plan = clone_plan(cached.plan);
+    if (plan == nullptr || !bind_plan_params(plan, cached.specs, sql_template.literals)) {
+        return nullptr;
+    }
+    return plan;
+}
+
+void store_template_plan(const SqlTemplate &sql_template, const std::shared_ptr<Plan> &plan,
+                         int param_count, uint64_t planned_version) {
+    if (!sql_template.ok || sql_template.literals.empty() || param_count <= 0 ||
+        static_cast<size_t>(param_count) != sql_template.literals.size() ||
+        !is_plan_cacheable(plan) || current_plan_cache_version() != planned_version) {
+        return;
+    }
+    std::vector<TemplateValueSpec> specs(param_count);
+    collect_plan_specs(plan, specs);
+    if (specs.size() != static_cast<size_t>(param_count)) {
+        return;
+    }
+    for (auto &spec : specs) {
+        if (!spec.initialized) {
+            return;
+        }
+    }
+    std::lock_guard<std::mutex> lock(plan_cache_latch);
+    if (plan_cache_version.load(std::memory_order_acquire) != planned_version) {
+        return;
+    }
+    if (template_plan_cache.size() >= PLAN_CACHE_MAX_ENTRIES &&
+        template_plan_cache.find(sql_template.key) == template_plan_cache.end()) {
+        template_plan_cache.erase(template_plan_cache.begin());
+    }
+    template_plan_cache[sql_template.key] = CachedTemplatePlan{planned_version, plan, std::move(specs)};
 }
 
 }  // namespace
@@ -417,6 +996,29 @@ void *client_handler(void *sock_fd) {
             }
             continue;
         }
+        SqlTemplate sql_template = build_sql_template(raw_cmd);
+        if (auto cached_template_plan = lookup_template_plan(sql_template)) {
+            try {
+                execute_plan(cached_template_plan);
+            } catch (TransactionAbortException &e) {
+                handle_transaction_abort(e);
+            } catch (RMDBError &e) {
+                handle_rmdb_error(e);
+            }
+            if(context.txn_ != nullptr && context.txn_->get_txn_mode() == false &&
+               context.txn_->get_state() != TransactionState::COMMITTED &&
+               context.txn_->get_state() != TransactionState::ABORTED)
+            {
+                txn_manager->commit(context.txn_, context.log_mgr_);
+                txn_manager->release_transaction(context.txn_);
+                context.txn_ = nullptr;
+                txn_id = INVALID_TXN_ID;
+            }
+            if (write(fd, data_send, offset + 1) == -1) {
+                break;
+            }
+            continue;
+        }
 
         // 用于判断是否已经调用了yy_delete_buffer来删除buf
         bool finish_analyze = false;
@@ -426,6 +1028,7 @@ void *client_handler(void *sock_fd) {
         if (yyparse() == 0) {
             if (ast::parse_tree != nullptr) {
                 try {
+                    int template_param_count = sql_template.ok ? assign_template_param_ids(ast::parse_tree) : 0;
                     // analyze and rewrite
                     std::shared_ptr<Query> query = analyze->do_analyze(ast::parse_tree);
                     yy_delete_buffer(buf);
@@ -435,6 +1038,7 @@ void *client_handler(void *sock_fd) {
                     std::shared_ptr<Plan> plan = optimizer->plan_query(query, &context);
                     execute_plan(plan);
                     store_cached_plan(sql_key, plan, planned_version);
+                    store_template_plan(sql_template, plan, template_param_count, planned_version);
                 } catch (TransactionAbortException &e) {
                     handle_transaction_abort(e);
                 } catch (RMDBError &e) {

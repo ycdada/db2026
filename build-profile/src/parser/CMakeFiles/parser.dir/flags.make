@@ -6,5 +6,5 @@ CXX_DEFINES =
 
 CXX_INCLUDES = -I/home/tst/db2026/src
 
-CXX_FLAGS = -Wall -O0 -g -ggdb3
+CXX_FLAGS = -Wall -O0 -g -ggdb3 -pg -fno-omit-frame-pointer -O3 -DNDEBUG -Wall -std=c++17
 

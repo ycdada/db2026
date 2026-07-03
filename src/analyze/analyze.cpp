@@ -667,6 +667,7 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
 
 Value Analyze::convert_sv_value(const std::shared_ptr<ast::Value> &sv_val) {
     Value val;
+    val.param_id = sv_val->param_id;
     if (auto int_lit = std::dynamic_pointer_cast<ast::IntLit>(sv_val)) {
         val.set_int(int_lit->val);
     } else if (auto float_lit = std::dynamic_pointer_cast<ast::FloatLit>(sv_val)) {
