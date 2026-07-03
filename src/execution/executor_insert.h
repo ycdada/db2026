@@ -59,7 +59,9 @@ class InsertExecutor : public AbstractExecutor {
                     throw IncompatibleTypeError(coltype2str(col.type), coltype2str(val.type));
                 }
             }
-            val.init_raw(col.len);
+            if (val.raw == nullptr) {
+                val.init_raw(col.len);
+            }
             memcpy(rec.data + col.offset, val.raw->data, col.len);
         }
         bool mvcc = context_ != nullptr && context_->txn_mgr_ != nullptr &&

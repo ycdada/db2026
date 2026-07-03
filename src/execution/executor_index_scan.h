@@ -36,12 +36,17 @@ class IndexScanExecutor : public AbstractExecutor {
     IxIndexHandle *ih_ = nullptr;
     std::vector<char> lower_key_;
     std::vector<char> upper_key_;
+    bool using_point_lookup_ = false;
+    bool point_has_rid_ = false;
+    bool point_consumed_ = true;
+    Rid point_rid_;
 
     Rid rid_;
     std::unique_ptr<RecScan> scan_;
     std::unique_ptr<RmRecord> cur_rec_;
     std::vector<std::pair<Rid, RmRecord>> extra_records_;
     size_t extra_pos_ = 0;
+    bool extra_loaded_ = false;
     std::set<std::pair<int, int>> seen_rids_;
     std::vector<Rid> returned_rids_;
     bool ser_read_registered_ = false;
@@ -75,6 +80,7 @@ class IndexScanExecutor : public AbstractExecutor {
             extra_records_.clear();
         }
         extra_pos_ = 0;
+        extra_loaded_ = true;
     }
 
     bool load_next_extra() {
@@ -88,8 +94,7 @@ class IndexScanExecutor : public AbstractExecutor {
         return true;
     }
 
-    bool load_visible_index_current() {
-        auto rid = scan_->rid();
+    bool load_visible_rid(const Rid &rid) {
         seen_rids_.insert({rid.page_no, rid.slot_no});
         if (use_2pl_locks()) {
             context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid, fh_->GetFd());
@@ -117,15 +122,76 @@ class IndexScanExecutor : public AbstractExecutor {
         return false;
     }
 
+    bool load_visible_index_current() {
+        return load_visible_rid(scan_->rid());
+    }
+
+    bool load_next_point() {
+        if (!point_has_rid_ || point_consumed_) {
+            return false;
+        }
+        point_consumed_ = true;
+        return load_visible_rid(point_rid_);
+    }
+
+    void copy_value_to_key(char *key, int offset, const ColMeta &col, const Value &value) {
+        if (value.raw != nullptr) {
+            memcpy(key + offset, value.raw->data, col.len);
+        } else if (col.type == TYPE_INT) {
+            memcpy(key + offset, &value.int_val, sizeof(int));
+        } else if (col.type == TYPE_FLOAT) {
+            memcpy(key + offset, &value.float_val, sizeof(float));
+        } else {
+            memset(key + offset, 0, col.len);
+            memcpy(key + offset, value.str_val.data(), std::min<int>(col.len, value.str_val.size()));
+        }
+    }
+
+    bool build_point_lookup_key() {
+        int offset = 0;
+        for (auto &col : index_meta_.cols) {
+            const Condition *eq = nullptr;
+            for (auto &cond : fed_conds_) {
+                if (cond.is_rhs_val && cond.op == OP_EQ &&
+                    cond.lhs_col.tab_name == tab_name_ && cond.lhs_col.col_name == col.name) {
+                    eq = &cond;
+                    break;
+                }
+            }
+            if (eq == nullptr) {
+                return false;
+            }
+            copy_value_to_key(lower_key_.data(), offset, col, eq->rhs_val);
+            offset += col.len;
+        }
+        return offset > 0;
+    }
+
     void advance_to_next_match() {
         cur_rec_ = nullptr;
+        if (using_point_lookup_) {
+            if (load_next_point()) {
+                return;
+            }
+            if (!extra_loaded_) {
+                load_mvcc_extra_records();
+            }
+            if (load_next_extra()) {
+                return;
+            }
+            end_ = true;
+            register_ser_read_once();
+            return;
+        }
         while (scan_ != nullptr && !scan_->is_end()) {
             if (load_visible_index_current()) {
                 return;
             }
             scan_->next();
         }
-        load_mvcc_extra_records();
+        if (!extra_loaded_) {
+            load_mvcc_extra_records();
+        }
         if (load_next_extra()) {
             return;
         }
@@ -217,9 +283,13 @@ class IndexScanExecutor : public AbstractExecutor {
                 cur_rec_ = nullptr;
                 extra_records_.clear();
                 extra_pos_ = 0;
+                extra_loaded_ = false;
                 seen_rids_.clear();
                 returned_rids_.clear();
                 ser_read_registered_ = false;
+                using_point_lookup_ = false;
+                point_has_rid_ = false;
+                point_consumed_ = true;
                 end_ = true;
                 return;
             }
@@ -235,8 +305,21 @@ class IndexScanExecutor : public AbstractExecutor {
         seen_rids_.clear();
         extra_records_.clear();
         extra_pos_ = 0;
+        extra_loaded_ = false;
         cur_rec_ = nullptr;
         end_ = true;
+        using_point_lookup_ = false;
+        point_has_rid_ = false;
+        point_consumed_ = true;
+
+        if (build_point_lookup_key()) {
+            using_point_lookup_ = true;
+            point_has_rid_ = ih_->get_value(lower_key_.data(), &point_rid_, context_ ? context_->txn_ : nullptr);
+            point_consumed_ = !point_has_rid_;
+            advance_to_next_match();
+            return;
+        }
+
         bool has_lower = false;
         bool has_upper = false;
         bool lower_open = false;
@@ -302,6 +385,20 @@ class IndexScanExecutor : public AbstractExecutor {
 
     void nextTuple() override {
         if (end_) return;
+        if (using_point_lookup_) {
+            if (extra_loaded_ && extra_pos_ < extra_records_.size()) {
+                extra_pos_++;
+                if (load_next_extra()) {
+                    return;
+                }
+                cur_rec_ = nullptr;
+                end_ = true;
+                register_ser_read_once();
+                return;
+            }
+            advance_to_next_match();
+            return;
+        }
         if (scan_ != nullptr && !scan_->is_end()) {
             scan_->next();
             advance_to_next_match();

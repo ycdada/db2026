@@ -82,7 +82,7 @@ class Portal
                 {
                     std::shared_ptr<ProjectionPlan> p = std::dynamic_pointer_cast<ProjectionPlan>(x->subplan_);
                     std::unique_ptr<AbstractExecutor> root= convert_plan_executor(p, context);
-                    return std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, std::move(p->sel_cols_), std::move(root), plan);
+                    return std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, p->sel_cols_, std::move(root), plan);
                 }
                     
                 case T_Update:
@@ -93,9 +93,8 @@ class Portal
 	                        rids.push_back(scan->rid());
 	                    }
 	                    scan->finish();
-	                    std::unique_ptr<AbstractExecutor> root = std::make_unique<UpdateExecutor>(
-                            sm_manager_, x->tab_name_, std::move(x->set_clauses_), std::move(x->conds_),
-                            std::move(rids), context);
+                    std::unique_ptr<AbstractExecutor> root = std::make_unique<UpdateExecutor>(
+                            sm_manager_, x->tab_name_, x->set_clauses_, x->conds_, std::move(rids), context);
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
                 case T_Delete:
@@ -107,8 +106,8 @@ class Portal
 	                    }
 	                    scan->finish();
 
-	                    std::unique_ptr<AbstractExecutor> root = std::make_unique<DeleteExecutor>(
-                            sm_manager_, x->tab_name_, std::move(x->conds_), std::move(rids), context);
+                    std::unique_ptr<AbstractExecutor> root = std::make_unique<DeleteExecutor>(
+                            sm_manager_, x->tab_name_, x->conds_, std::move(rids), context);
 
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
@@ -116,7 +115,7 @@ class Portal
                 case T_Insert:
                 {
                     std::unique_ptr<AbstractExecutor> root =
-                            std::make_unique<InsertExecutor>(sm_manager_, x->tab_name_, std::move(x->values_), context);
+                            std::make_unique<InsertExecutor>(sm_manager_, x->tab_name_, x->values_, context);
 
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
@@ -193,19 +192,19 @@ class Portal
             return std::make_unique<FilterExecutor>(convert_plan_executor(x->subplan_, context), x->conds_);
         } else if(auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
             if(x->tag == T_SeqScan) {
-                return std::make_unique<SeqScanExecutor>(sm_manager_, x->tab_name_, std::move(x->conds_), context);
+                return std::make_unique<SeqScanExecutor>(sm_manager_, x->tab_name_, x->conds_, context);
             }
             else {
-                return std::make_unique<IndexScanExecutor>(sm_manager_, x->tab_name_, std::move(x->conds_),
-                                                           std::move(x->index_col_names_), context,
+                return std::make_unique<IndexScanExecutor>(sm_manager_, x->tab_name_, x->conds_,
+                                                           x->index_col_names_, context,
                                                            x->is_join_inner_, x->join_outer_col_, x->join_inner_col_);
             }
         } else if(auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
             std::unique_ptr<AbstractExecutor> left = convert_plan_executor(x->left_, context);
             std::unique_ptr<AbstractExecutor> right = convert_plan_executor(x->right_, context);
             std::unique_ptr<AbstractExecutor> join = std::make_unique<NestedLoopJoinExecutor>(
-                                std::move(left), 
-                                std::move(right), std::move(x->conds_));
+                                std::move(left),
+                                std::move(right), x->conds_);
             return join;
         } else if(auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
             return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context), 

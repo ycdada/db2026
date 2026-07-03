@@ -17,8 +17,12 @@ See the Mulan PSL v2 for more details. */
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <fstream>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <string_view>
+#include <unordered_map>
 #include "errors.h"
 #include "optimizer/optimizer.h"
 #include "recovery/log_recovery.h"
@@ -42,7 +46,7 @@ auto lock_manager = std::make_unique<LockManager>();
 auto txn_manager = std::make_unique<TransactionManager>(lock_manager.get(), sm_manager.get());
 auto planner = std::make_unique<Planner>(sm_manager.get());
 auto optimizer = std::make_unique<Optimizer>(sm_manager.get(), planner.get());
-auto ql_manager = std::make_unique<QlManager>(sm_manager.get(), txn_manager.get(), nullptr);
+auto ql_manager = std::make_unique<QlManager>(sm_manager.get(), txn_manager.get(), planner.get());
 auto log_manager = std::make_unique<LogManager>(disk_manager.get());
 auto recovery = std::make_unique<RecoveryManager>(disk_manager.get(), buffer_pool_manager.get(), sm_manager.get());
 auto portal = std::make_unique<Portal>(sm_manager.get());
@@ -58,22 +62,89 @@ void sigint_handler(int signo) {
     longjmp(jmpbuf, 1);
 }
 
-static bool is_transaction_control_query(const std::shared_ptr<Query> &query) {
-    return std::dynamic_pointer_cast<ast::TxnBegin>(query->parse) != nullptr ||
-           std::dynamic_pointer_cast<ast::TxnCommit>(query->parse) != nullptr ||
-           std::dynamic_pointer_cast<ast::TxnAbort>(query->parse) != nullptr ||
-           std::dynamic_pointer_cast<ast::TxnRollback>(query->parse) != nullptr ||
-           std::dynamic_pointer_cast<ast::StaticCheckpoint>(query->parse) != nullptr;
+namespace {
+
+constexpr size_t PLAN_CACHE_MAX_ENTRIES = 256;
+
+struct CachedPlan {
+    uint64_t version;
+    std::shared_ptr<Plan> plan;
+};
+
+std::mutex plan_cache_latch;
+std::unordered_map<std::string, CachedPlan> plan_cache;
+std::atomic<uint64_t> plan_cache_version{0};
+
+bool plan_needs_transaction(const std::shared_ptr<Plan> &plan) {
+    if (auto other = std::dynamic_pointer_cast<OtherPlan>(plan)) {
+        return other->tag != T_Transaction_begin &&
+               other->tag != T_Transaction_commit &&
+               other->tag != T_Transaction_abort &&
+               other->tag != T_Transaction_rollback &&
+               other->tag != T_StaticCheckpoint;
+    }
+    if (std::dynamic_pointer_cast<SetKnobPlan>(plan) != nullptr ||
+        std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
+        return false;
+    }
+    return true;
 }
 
-static bool is_session_only_query(const std::shared_ptr<Query> &query) {
-    return std::dynamic_pointer_cast<ast::SetIsolationStmt>(query->parse) != nullptr ||
-           std::dynamic_pointer_cast<ast::SetStmt>(query->parse) != nullptr;
+bool plan_invalidates_cache(const std::shared_ptr<Plan> &plan) {
+    if (std::dynamic_pointer_cast<DDLPlan>(plan) != nullptr ||
+        std::dynamic_pointer_cast<LoadPlan>(plan) != nullptr ||
+        std::dynamic_pointer_cast<SetKnobPlan>(plan) != nullptr) {
+        return true;
+    }
+    if (auto other = std::dynamic_pointer_cast<OtherPlan>(plan)) {
+        return other->tag == T_StaticCheckpoint;
+    }
+    return false;
 }
 
-static bool query_needs_transaction(const std::shared_ptr<Query> &query) {
-    return !is_transaction_control_query(query) && !is_session_only_query(query);
+bool is_plan_cacheable(const std::shared_ptr<Plan> &plan) {
+    return std::dynamic_pointer_cast<DMLPlan>(plan) != nullptr;
 }
+
+uint64_t current_plan_cache_version() {
+    return plan_cache_version.load(std::memory_order_acquire);
+}
+
+void invalidate_plan_cache() {
+    std::lock_guard<std::mutex> lock(plan_cache_latch);
+    plan_cache.clear();
+    plan_cache_version.fetch_add(1, std::memory_order_acq_rel);
+}
+
+std::shared_ptr<Plan> lookup_cached_plan(const std::string &sql) {
+    uint64_t version = current_plan_cache_version();
+    std::lock_guard<std::mutex> lock(plan_cache_latch);
+    auto it = plan_cache.find(sql);
+    if (it == plan_cache.end()) {
+        return nullptr;
+    }
+    if (it->second.version != version) {
+        plan_cache.erase(it);
+        return nullptr;
+    }
+    return it->second.plan;
+}
+
+void store_cached_plan(const std::string &sql, const std::shared_ptr<Plan> &plan, uint64_t planned_version) {
+    if (!is_plan_cacheable(plan) || current_plan_cache_version() != planned_version) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(plan_cache_latch);
+    if (plan_cache_version.load(std::memory_order_acquire) != planned_version) {
+        return;
+    }
+    if (plan_cache.size() >= PLAN_CACHE_MAX_ENTRIES && plan_cache.find(sql) == plan_cache.end()) {
+        plan_cache.erase(plan_cache.begin());
+    }
+    plan_cache[sql] = CachedPlan{planned_version, plan};
+}
+
+}  // namespace
 
 static void EnsureStatementTransaction(txn_id_t *txn_id, Context *context,
                                        IsolationLevel session_isolation_level) {
@@ -235,6 +306,7 @@ void *client_handler(void *sock_fd) {
             try {
                 EnsureStatementTransaction(&txn_id, &context, session_isolation_level);
                 sm_manager->load_table(load_file, load_table, &context);
+                invalidate_plan_cache();
             } catch (TransactionAbortException &e) {
                 std::string str = "abort\n";
                 memcpy(data_send, str.c_str(), str.length());
@@ -275,8 +347,80 @@ void *client_handler(void *sock_fd) {
             continue;
         }
 
+        auto handle_transaction_abort = [&](TransactionAbortException &) {
+            std::string str = "abort\n";
+            memcpy(data_send, str.c_str(), str.length());
+            data_send[str.length()] = '\0';
+            offset = str.length();
+
+            AbortActiveTransaction(&txn_id, &context);
+
+            if (output_file_enabled) {
+                std::fstream outfile;
+                outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+                outfile << str;
+                outfile.close();
+            }
+        };
+
+        auto handle_rmdb_error = [&](RMDBError &e) {
+            AbortActiveTransaction(&txn_id, &context);
+
+            memcpy(data_send, e.what(), e.get_msg_len());
+            data_send[e.get_msg_len()] = '\n';
+            data_send[e.get_msg_len() + 1] = '\0';
+            offset = e.get_msg_len() + 1;
+
+            if (output_file_enabled) {
+                std::fstream outfile;
+                outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+                outfile << "failure\n";
+                outfile.close();
+            }
+        };
+
+        auto execute_plan = [&](const std::shared_ptr<Plan> &plan) {
+            if (plan_needs_transaction(plan)) {
+                EnsureStatementTransaction(&txn_id, &context, session_isolation_level);
+            }
+            std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, &context);
+            portal->run(portalStmt, ql_manager.get(), &txn_id, &context);
+            portal->drop();
+            if (std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
+                isolation_output_format.store(true);
+            }
+            if (plan_invalidates_cache(plan)) {
+                invalidate_plan_cache();
+            }
+        };
+
+        std::string sql_key(raw_cmd.data(), raw_cmd.size());
+        if (auto cached_plan = lookup_cached_plan(sql_key)) {
+            try {
+                execute_plan(cached_plan);
+            } catch (TransactionAbortException &e) {
+                handle_transaction_abort(e);
+            } catch (RMDBError &e) {
+                handle_rmdb_error(e);
+            }
+            if(context.txn_ != nullptr && context.txn_->get_txn_mode() == false &&
+               context.txn_->get_state() != TransactionState::COMMITTED &&
+               context.txn_->get_state() != TransactionState::ABORTED)
+            {
+                txn_manager->commit(context.txn_, context.log_mgr_);
+                txn_manager->release_transaction(context.txn_);
+                context.txn_ = nullptr;
+                txn_id = INVALID_TXN_ID;
+            }
+            if (write(fd, data_send, offset + 1) == -1) {
+                break;
+            }
+            continue;
+        }
+
         // 用于判断是否已经调用了yy_delete_buffer来删除buf
         bool finish_analyze = false;
+        uint64_t planned_version = current_plan_cache_version();
         pthread_mutex_lock(buffer_mutex);
         YY_BUFFER_STATE buf = yy_scan_string(data_recv);
         if (yyparse() == 0) {
@@ -287,50 +431,14 @@ void *client_handler(void *sock_fd) {
                     yy_delete_buffer(buf);
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
-                    if (query_needs_transaction(query)) {
-                        EnsureStatementTransaction(&txn_id, &context, session_isolation_level);
-                    }
                     // 优化器
                     std::shared_ptr<Plan> plan = optimizer->plan_query(query, &context);
-                    // portal
-                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, &context);
-                    portal->run(portalStmt, ql_manager.get(), &txn_id, &context);
-                    portal->drop();
-                    if (std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
-                        isolation_output_format.store(true);
-                    }
+                    execute_plan(plan);
+                    store_cached_plan(sql_key, plan, planned_version);
                 } catch (TransactionAbortException &e) {
-                    // 事务需要回滚，需要把abort信息返回给客户端并写入output.txt文件中
-                    std::string str = "abort\n";
-                    memcpy(data_send, str.c_str(), str.length());
-                    data_send[str.length()] = '\0';
-                    offset = str.length();
-
-                    // 回滚事务
-                    AbortActiveTransaction(&txn_id, &context);
-
-                    if (output_file_enabled) {
-                        std::fstream outfile;
-                        outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-                        outfile << str;
-                        outfile.close();
-                    }
+                    handle_transaction_abort(e);
                 } catch (RMDBError &e) {
-                    // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
-                    AbortActiveTransaction(&txn_id, &context);
-
-                    memcpy(data_send, e.what(), e.get_msg_len());
-                    data_send[e.get_msg_len()] = '\n';
-                    data_send[e.get_msg_len() + 1] = '\0';
-                    offset = e.get_msg_len() + 1;
-
-                    // 将报错信息写入output.txt
-                    if (output_file_enabled) {
-                        std::fstream outfile;
-                        outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-                        outfile << "failure\n";
-                        outfile.close();
-                    }
+                    handle_rmdb_error(e);
                 }
             }
         } else {

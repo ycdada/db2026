@@ -204,7 +204,7 @@ std::pair<IxNodeHandle *, bool> IxIndexHandle::find_leaf_page(const char *key, O
  * @param transaction 事务指针
  * @return bool 返回目标键值对是否存在
  */
-bool IxIndexHandle::get_value(const char *key, std::vector<Rid> *result, Transaction *transaction) {
+bool IxIndexHandle::get_value(const char *key, Rid *result, Transaction *transaction) {
     std::lock_guard<std::mutex> lock(root_latch_);
     auto leaf_pair = find_leaf_page(key, Operation::FIND, transaction);
     IxNodeHandle *leaf = leaf_pair.first;
@@ -214,10 +214,19 @@ bool IxIndexHandle::get_value(const char *key, std::vector<Rid> *result, Transac
     Rid *rid = nullptr;
     bool found = leaf->leaf_lookup(key, &rid);
     if (found) {
-        result->push_back(*rid);
+        *result = *rid;
     }
     buffer_pool_manager_->unpin_page(leaf->get_page_id(), false);
     return found;
+}
+
+bool IxIndexHandle::get_value(const char *key, std::vector<Rid> *result, Transaction *transaction) {
+    Rid rid;
+    if (!get_value(key, &rid, transaction)) {
+        return false;
+    }
+    result->push_back(rid);
+    return true;
 }
 
 /**
