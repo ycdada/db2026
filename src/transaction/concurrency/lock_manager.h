@@ -50,6 +50,8 @@ public:
 
     bool lock_shared_on_record(Transaction* txn, const Rid& rid, int tab_fd);
 
+    bool lock_shared_on_record_short(Transaction* txn, const Rid& rid, int tab_fd);
+
     bool lock_update_on_record(Transaction* txn, const Rid& rid, int tab_fd);
 
     bool lock_exclusive_on_record(Transaction* txn, const Rid& rid, int tab_fd);
@@ -62,10 +64,10 @@ public:
 
     bool lock_IX_on_table(Transaction* txn, int tab_fd);
 
-    bool unlock(Transaction* txn, LockDataId lock_data_id, bool enter_shrinking = true);
+    bool unlock(Transaction* txn, LockDataId lock_data_id, bool enter_shrinking = true, bool erase_from_txn = true);
 
 private:
-    bool lock(Transaction *txn, LockDataId lid, LockMode mode);
+    bool lock(Transaction *txn, LockDataId lid, LockMode mode, bool track_in_txn = true);
 
     struct LockTableShard {
         std::mutex latch_;

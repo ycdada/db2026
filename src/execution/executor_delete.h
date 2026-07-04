@@ -87,7 +87,7 @@ class DeleteExecutor : public AbstractExecutor {
             if (rec == nullptr) {
                 continue;
             }
-            if (!cond_eval_.eval(rec->data)) {
+            if (!cond_eval_.empty() && !cond_eval_.eval(rec->data)) {
                 continue;
             }
             if (mvcc) {

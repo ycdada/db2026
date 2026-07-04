@@ -32,7 +32,7 @@ class FilterExecutor : public AbstractExecutor {
     void find_next_valid() {
         while (!prev_->is_end()) {
             auto rec = prev_->Next();
-            if (rec != nullptr && cond_eval_.eval(rec->data)) {
+            if (rec != nullptr && (cond_eval_.empty() || cond_eval_.eval(rec->data))) {
                 cur_ = std::move(rec);
                 is_end_ = false;
                 return;

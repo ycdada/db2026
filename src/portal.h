@@ -198,7 +198,7 @@ class Portal
         } else if(auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
             if(x->tag == T_SeqScan) {
                 return std::make_unique<SeqScanExecutor>(sm_manager_, x->tab_name_, x->conds_, context,
-                                                         acquire_read_locks, use_update_read_locks);
+                                                         acquire_read_locks, false);
             }
             else {
                 return std::make_unique<IndexScanExecutor>(sm_manager_, x->tab_name_, x->conds_,

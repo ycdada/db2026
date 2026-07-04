@@ -115,7 +115,7 @@ class UpdateExecutor : public AbstractExecutor {
             if (old_rec == nullptr) {
                 continue;
             }
-            if (!cond_eval_.eval(old_rec->data)) {
+            if (!cond_eval_.empty() && !cond_eval_.eval(old_rec->data)) {
                 continue;
             }
             auto new_rec = std::make_unique<RmRecord>(fh_->get_file_hdr().record_size, old_rec->data);

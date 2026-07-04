@@ -223,6 +223,8 @@ class ConditionEvaluator {
         }
     }
 
+    bool empty() const { return conds_.empty(); }
+
     bool eval(const char *rec_data) const {
         for (auto &cond : conds_) {
             if (cond.lhs == nullptr || (!cond.is_rhs_val && cond.rhs_col == nullptr)) {

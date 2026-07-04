@@ -118,6 +118,8 @@ class IndexScanExecutor : public AbstractExecutor {
             bool already_locked = context_->txn_->get_lock_set()->count(read_lock_id) != 0;
             if (use_update_read_locks()) {
                 context_->lock_mgr_->lock_update_on_record(context_->txn_, rid, tab_fd_);
+            } else if (use_short_read_locks() && !already_locked) {
+                context_->lock_mgr_->lock_shared_on_record_short(context_->txn_, rid, tab_fd_);
             } else {
                 context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid, tab_fd_);
             }
@@ -125,7 +127,7 @@ class IndexScanExecutor : public AbstractExecutor {
         }
         auto release_short_read_lock = [&]() {
             if (release_read_lock) {
-                context_->lock_mgr_->unlock(context_->txn_, read_lock_id, false);
+                context_->lock_mgr_->unlock(context_->txn_, read_lock_id, false, false);
                 release_read_lock = false;
             }
         };
@@ -154,7 +156,7 @@ class IndexScanExecutor : public AbstractExecutor {
             release_short_read_lock();
             throw;
         }
-        if (rec_data != nullptr && cond_eval_.eval(rec_data)) {
+        if (rec_data != nullptr && (cond_eval_.empty() || cond_eval_.eval(rec_data))) {
             cur_rec_ = std::move(rec);
             cur_rec_handle_ = std::move(rec_handle);
             rid_ = rid;
@@ -210,6 +212,26 @@ class IndexScanExecutor : public AbstractExecutor {
             offset += col.len;
         }
         return offset > 0;
+    }
+
+    bool has_full_eq_lookup() const {
+        if (index_meta_.cols.empty()) {
+            return false;
+        }
+        for (auto &col : index_meta_.cols) {
+            bool matched = false;
+            for (auto &cond : conds_) {
+                if (cond.is_rhs_val && cond.op == OP_EQ &&
+                    cond.lhs_col.tab_name == tab_name_ && cond.lhs_col.col_name == col.name) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                return false;
+            }
+        }
+        return true;
     }
 
     void advance_to_next_match() {
@@ -307,9 +329,6 @@ class IndexScanExecutor : public AbstractExecutor {
         use_2pl_locks_ = acquire_read_locks &&
                          context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
                          (context_->txn_mgr_ == nullptr || !is_mvcc_txn_);
-        use_update_read_locks_ = use_2pl_locks_ && use_update_read_locks &&
-                                 context_->txn_->get_isolation_level() == IsolationLevel::READ_COMMITTED &&
-                                 context_->txn_->get_txn_mode();
         for (auto &cond : conds_) {
             if (cond.lhs_col.tab_name != tab_name_) {
                 // lhs is on other table, now rhs must be on this table
@@ -325,6 +344,9 @@ class IndexScanExecutor : public AbstractExecutor {
                 }
             }
         }
+        use_update_read_locks_ = use_2pl_locks_ && use_update_read_locks && has_full_eq_lookup() &&
+                                 context_->txn_->get_isolation_level() == IsolationLevel::READ_COMMITTED &&
+                                 context_->txn_->get_txn_mode();
         fed_conds_ = conds_;
     }
 

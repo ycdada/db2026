@@ -45,7 +45,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
                 auto joined = std::make_unique<RmRecord>(len_);
                 memcpy(joined->data, left_rec_->data, left_->tupleLen());
                 memcpy(joined->data + left_->tupleLen(), cur_right->data, right_->tupleLen());
-                if (cond_eval_.eval(joined->data)) {
+                if (cond_eval_.empty() || cond_eval_.eval(joined->data)) {
                     right_rec_ = std::move(cur_right);
                     isend = false;
                     return;

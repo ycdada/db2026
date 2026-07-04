@@ -69,6 +69,8 @@ class SeqScanExecutor : public AbstractExecutor {
             bool already_locked = context_->txn_->get_lock_set()->count(read_lock_id) != 0;
             if (use_update_read_locks()) {
                 context_->lock_mgr_->lock_update_on_record(context_->txn_, current_rid, tab_fd_);
+            } else if (use_short_read_locks() && !already_locked) {
+                context_->lock_mgr_->lock_shared_on_record_short(context_->txn_, current_rid, tab_fd_);
             } else {
                 context_->lock_mgr_->lock_shared_on_record(context_->txn_, current_rid, tab_fd_);
             }
@@ -76,7 +78,7 @@ class SeqScanExecutor : public AbstractExecutor {
         }
         auto release_short_read_lock = [&]() {
             if (release_read_lock) {
-                context_->lock_mgr_->unlock(context_->txn_, read_lock_id, false);
+                context_->lock_mgr_->unlock(context_->txn_, read_lock_id, false, false);
                 release_read_lock = false;
             }
         };
@@ -105,7 +107,7 @@ class SeqScanExecutor : public AbstractExecutor {
             release_short_read_lock();
             throw;
         }
-	        if (visible_data != nullptr && cond_eval_.eval(visible_data)) {
+	        if (visible_data != nullptr && (cond_eval_.empty() || cond_eval_.eval(visible_data))) {
 	            cur_rec_ = std::move(visible);
                 cur_rec_handle_ = std::move(visible_handle);
 	            rid_ = current_rid;

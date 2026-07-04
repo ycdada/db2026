@@ -24,7 +24,7 @@ LockManager::LockTableShard &LockManager::get_shard(const LockDataId &lock_data_
  * @description: 通用加锁实现（waiting 2PL with bounded deadlock prevention）
  * @return true 加锁成功
  */
-bool LockManager::lock(Transaction *txn, LockDataId lid, LockMode mode) {
+bool LockManager::lock(Transaction *txn, LockDataId lid, LockMode mode, bool track_in_txn) {
     auto compatible = [](LockMode lhs, LockMode rhs) -> bool {
         if (lhs == LockMode::EXLUCSIVE || rhs == LockMode::EXLUCSIVE) return false;
         if (lhs == LockMode::UPDATE) {
@@ -143,7 +143,9 @@ bool LockManager::lock(Transaction *txn, LockDataId lid, LockMode mode) {
         queue.request_queue_.emplace_back(txn->get_transaction_id(), mode);
         queue.request_queue_.back().granted_ = true;
         queue.group_lock_mode_ = group_from_lock(mode);
-        txn->get_lock_set()->insert(lid);
+        if (track_in_txn) {
+            txn->get_lock_set()->insert(lid);
+        }
         return true;
     }
 
@@ -195,12 +197,18 @@ bool LockManager::lock(Transaction *txn, LockDataId lid, LockMode mode) {
     }
     request_it->granted_ = true;
     recompute_group(queue);
-    txn->get_lock_set()->insert(lid);
+    if (track_in_txn) {
+        txn->get_lock_set()->insert(lid);
+    }
     return true;
 }
 
 bool LockManager::lock_shared_on_record(Transaction *txn, const Rid &rid, int tab_fd) {
     return lock(txn, LockDataId(tab_fd, rid, LockDataType::RECORD), LockMode::SHARED);
+}
+
+bool LockManager::lock_shared_on_record_short(Transaction *txn, const Rid &rid, int tab_fd) {
+    return lock(txn, LockDataId(tab_fd, rid, LockDataType::RECORD), LockMode::SHARED, false);
 }
 
 bool LockManager::lock_update_on_record(Transaction *txn, const Rid &rid, int tab_fd) {
@@ -231,7 +239,7 @@ bool LockManager::lock_IX_on_table(Transaction *txn, int tab_fd) {
  * @description: 释放锁
  * @return true 解锁成功
  */
-bool LockManager::unlock(Transaction *txn, LockDataId lock_data_id, bool enter_shrinking) {
+bool LockManager::unlock(Transaction *txn, LockDataId lock_data_id, bool enter_shrinking, bool erase_from_txn) {
     auto &shard = get_shard(lock_data_id);
     std::lock_guard<std::mutex> guard(shard.latch_);
 
@@ -242,7 +250,9 @@ bool LockManager::unlock(Transaction *txn, LockDataId lock_data_id, bool enter_s
     if (queue.request_queue_.size() == 1) {
         auto req_it = queue.request_queue_.begin();
         if (req_it->txn_id_ == txn->get_transaction_id() && req_it->granted_) {
-            txn->get_lock_set()->erase(lock_data_id);
+            if (erase_from_txn) {
+                txn->get_lock_set()->erase(lock_data_id);
+            }
             if (enter_shrinking && (txn->get_state() == TransactionState::GROWING ||
                                     txn->get_state() == TransactionState::DEFAULT)) {
                 txn->set_state(TransactionState::SHRINKING);
@@ -283,7 +293,9 @@ bool LockManager::unlock(Transaction *txn, LockDataId lock_data_id, bool enter_s
         }
     }
 
-    txn->get_lock_set()->erase(lock_data_id);
+    if (erase_from_txn) {
+        txn->get_lock_set()->erase(lock_data_id);
+    }
 
     // 2PL: 释放锁后事务进入 SHRINKING 阶段
     if (enter_shrinking && (txn->get_state() == TransactionState::GROWING ||
