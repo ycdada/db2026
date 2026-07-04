@@ -341,10 +341,16 @@ def write_folded(entries: list[tuple[str, float, float]], folded_path: Path) -> 
 
 
 def main() -> int:
+    global PROFILE_BUILD, PROFILE_BIN, OUT_DIR
     parser = argparse.ArgumentParser(description="Generate an RMDB gprof-based SVG flame graph.")
     parser.add_argument("--iterations", type=int, default=250, help="number of OLTP-style transactions to run")
+    parser.add_argument("--build-dir", type=Path, default=PROFILE_BUILD, help="CMake build directory containing bin/rmdb")
+    parser.add_argument("--out-dir", type=Path, default=OUT_DIR, help="directory for profiling outputs")
     args = parser.parse_args()
 
+    PROFILE_BUILD = args.build_dir.resolve()
+    PROFILE_BIN = PROFILE_BUILD / "bin" / "rmdb"
+    OUT_DIR = args.out_dir.resolve()
     OUT_DIR.mkdir(exist_ok=True)
     gmon_path, db_path = run_workload(args.iterations)
     gprof_path = run_gprof(gmon_path)
