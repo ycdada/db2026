@@ -11,6 +11,8 @@ Use C++17 and keep changes consistent with the existing codebase: 4-space indent
 
 When fixing bugs, do not roll back or remove existing optimization code as the default solution. Preserve performance-oriented changes and repair the faulty behavior within that design unless the user explicitly asks to revert the optimization or confirms that reverting it is acceptable.
 
+Performance optimizations must be implemented as general database mechanisms. Do not add table-name, field-name, fixed SQL text, benchmark-case, or TPC-C-transaction-specific shortcuts that bypass the normal parser, optimizer, executor, transaction, storage, index, or WAL paths. Optimize through reusable improvements such as better plan selection, index/range scan support, executor efficiency, concurrency control, buffer management, and logging.
+
 ## Testing Guidelines
 Add or extend tests when touching storage, concurrency, parser, or recovery logic. Follow GoogleTest naming like `TEST(LRUReplacerTest, SampleTest)`. Keep test data isolated to repository-local directories and clean up files when practical. Before opening a PR, run `./build/bin/unit_test` and `cd build && ctest --output-on-failure`.
 

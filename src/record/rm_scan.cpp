@@ -18,11 +18,11 @@ See the Mulan PSL v2 for more details. */
 RmScan::RmScan(const RmFileHandle *file_handle) : file_handle_(file_handle) {
     rids_ = file_handle_->snapshot_rids();
     pos_ = 0;
-    if (rids_.empty()) {
+    if (rids_->empty()) {
         rid_.page_no = RM_NO_PAGE;
         rid_.slot_no = RM_NO_PAGE;
     } else {
-        rid_ = rids_[0];
+        rid_ = (*rids_)[0];
     }
 }
 
@@ -30,12 +30,12 @@ RmScan::RmScan(const RmFileHandle *file_handle) : file_handle_(file_handle) {
  * @brief 找到文件中下一个存放了记录的位置
  */
 void RmScan::next() {
-    if (pos_ + 1 < rids_.size()) {
+    if (pos_ + 1 < rids_->size()) {
         pos_++;
-        rid_ = rids_[pos_];
+        rid_ = (*rids_)[pos_];
         return;
     }
-    pos_ = rids_.size();
+    pos_ = rids_->size();
     rid_.page_no = RM_NO_PAGE;
     rid_.slot_no = RM_NO_PAGE;
 }

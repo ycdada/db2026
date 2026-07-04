@@ -59,6 +59,10 @@ std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid& rid, Context* cont
 std::shared_ptr<const RmRecord> RmFileHandle::get_record_handle(const Rid& rid, Context* context) const {
     std::shared_lock<std::shared_mutex> handle_guard(latch_);
     ensure_open_locked();
+    return get_record_handle_fast(rid);
+}
+
+std::shared_ptr<const RmRecord> RmFileHandle::get_record_handle_fast(const Rid& rid) const {
     std::shared_lock<std::shared_mutex> guard(shared_state_->latch);
     auto mem_it = shared_state_->records.find(memory_key(rid));
     if (mem_it == shared_state_->records.end()) {
@@ -93,13 +97,15 @@ Rid RmFileHandle::insert_record(char* buf, Context* context) {
     if (page_handle.page_hdr->num_records == file_hdr_.num_records_per_page) {
         remove_page_from_free_list(page_handle);
     }
-    page_id_t page_no = page_handle.page->get_page_id().page_no;
-    shared_state_->records[memory_key(Rid{page_no, slot_no})] =
+    Rid rid{page_handle.page->get_page_id().page_no, slot_no};
+    shared_state_->records[memory_key(rid)] =
         std::make_shared<RmRecord>(file_hdr_.record_size, buf);
+    insert_rid_sorted(shared_state_->rid_list, rid);
+    shared_state_->rid_snapshot.reset();
     shared_state_->file_hdr = file_hdr_;
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
-    return Rid{page_no, slot_no};
+    return rid;
 
 }
 
@@ -131,6 +137,8 @@ void RmFileHandle::insert_record(const Rid& rid, char* buf) {
         remove_page_from_free_list(page_handle);
     }
     shared_state_->records[memory_key(rid)] = std::make_shared<RmRecord>(file_hdr_.record_size, buf);
+    insert_rid_sorted(shared_state_->rid_list, rid);
+    shared_state_->rid_snapshot.reset();
     shared_state_->file_hdr = file_hdr_;
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
@@ -161,6 +169,8 @@ void RmFileHandle::delete_record(const Rid& rid, Context* context) {
         release_page_handle(page_handle);
     }
     shared_state_->records.erase(memory_key(rid));
+    erase_rid_sorted(shared_state_->rid_list, rid);
+    shared_state_->rid_snapshot.reset();
     shared_state_->file_hdr = file_hdr_;
     buffer_pool_manager_->mark_dirty(page_handle.page);
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
@@ -207,6 +217,8 @@ void RmFileHandle::reset_data_pages() {
     file_hdr_.first_free_page_no = RM_NO_PAGE;
     disk_manager_->set_fd2pageno(fd_, file_hdr_.num_pages);
     shared_state_->records.clear();
+    shared_state_->rid_list.clear();
+    shared_state_->rid_snapshot = std::make_shared<const std::vector<Rid>>();
     shared_state_->file_hdr = file_hdr_;
     shared_state_->records_loaded = true;
 }
@@ -216,24 +228,26 @@ void RmFileHandle::reserve_memory_records(size_t count) {
     ensure_open_locked();
     std::unique_lock<std::shared_mutex> guard(shared_state_->latch);
     shared_state_->records.reserve(shared_state_->records.size() + count);
+    shared_state_->rid_list.reserve(shared_state_->rid_list.size() + count);
 }
 
-std::vector<Rid> RmFileHandle::snapshot_rids() const {
+std::shared_ptr<const std::vector<Rid>> RmFileHandle::snapshot_rids() const {
     std::shared_lock<std::shared_mutex> handle_guard(latch_);
     ensure_open_locked();
-    std::shared_lock<std::shared_mutex> guard(shared_state_->latch);
-    std::vector<Rid> rids;
-    rids.reserve(shared_state_->records.size());
-    for (const auto &entry : shared_state_->records) {
-        rids.push_back(key_to_rid(entry.first));
-    }
-    std::sort(rids.begin(), rids.end(), [](const Rid &lhs, const Rid &rhs) {
-        if (lhs.page_no != rhs.page_no) {
-            return lhs.page_no < rhs.page_no;
+    {
+        std::shared_lock<std::shared_mutex> guard(shared_state_->latch);
+        if (shared_state_->rid_snapshot != nullptr) {
+            return shared_state_->rid_snapshot;
         }
-        return lhs.slot_no < rhs.slot_no;
-    });
-    return rids;
+    }
+
+    std::unique_lock<std::shared_mutex> guard(shared_state_->latch);
+    if (shared_state_->rid_snapshot != nullptr) {
+        return shared_state_->rid_snapshot;
+    }
+    auto rids = std::make_shared<std::vector<Rid>>(shared_state_->rid_list);
+    shared_state_->rid_snapshot = rids;
+    return shared_state_->rid_snapshot;
 }
 
 /**
@@ -335,6 +349,8 @@ void RmFileHandle::load_memory_records() {
         return;
     }
     shared_state_->records.clear();
+    shared_state_->rid_list.clear();
+    shared_state_->rid_snapshot.reset();
     int file_pages = disk_manager_->get_file_size(disk_manager_->get_file_name(fd_)) / PAGE_SIZE;
     int loaded_pages = std::min(file_hdr_.num_pages, file_pages);
     for (int page_no = RM_FIRST_RECORD_PAGE; page_no < loaded_pages; ++page_no) {
@@ -342,13 +358,17 @@ void RmFileHandle::load_memory_records() {
         RmPageHandle page_handle(&file_hdr_, page);
         for (int slot_no = 0; slot_no < file_hdr_.num_records_per_page; ++slot_no) {
             if (Bitmap::is_set(page_handle.bitmap, slot_no)) {
-                shared_state_->records[memory_key(Rid{page_no, slot_no})] =
+                Rid rid{page_no, slot_no};
+                shared_state_->records[memory_key(rid)] =
                     std::make_shared<RmRecord>(file_hdr_.record_size, page_handle.get_slot(slot_no));
+                shared_state_->rid_list.push_back(rid);
             }
         }
         buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
     }
+    std::sort(shared_state_->rid_list.begin(), shared_state_->rid_list.end(), rid_less);
     shared_state_->records_loaded = true;
+    shared_state_->rid_snapshot.reset();
 }
 
 void RmFileHandle::remove_page_from_free_list(RmPageHandle &page_handle) {

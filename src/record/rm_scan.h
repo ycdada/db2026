@@ -12,13 +12,14 @@ See the Mulan PSL v2 for more details. */
 
 #include "rm_defs.h"
 
+#include <memory>
 #include <vector>
 
 class RmFileHandle;
 
 class RmScan : public RecScan {
     const RmFileHandle *file_handle_;
-    std::vector<Rid> rids_;
+    std::shared_ptr<const std::vector<Rid>> rids_;
     size_t pos_ = 0;
     Rid rid_;
 

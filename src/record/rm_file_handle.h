@@ -67,6 +67,9 @@ class RmFileHandle {
         bool records_loaded = false;
         size_t active_handles = 0;
         std::unordered_map<int64_t, std::shared_ptr<RmRecord>> records;
+        std::vector<std::shared_ptr<RmRecord>> record_slots;
+        std::vector<Rid> rid_list;
+        std::shared_ptr<const std::vector<Rid>> rid_snapshot;
     };
 
     std::shared_ptr<SharedRecordState> shared_state_;
@@ -122,6 +125,8 @@ class RmFileHandle {
 
     std::shared_ptr<const RmRecord> get_record_handle(const Rid &rid, Context *context) const;
 
+    std::shared_ptr<const RmRecord> get_record_handle_fast(const Rid &rid) const;
+
     Rid insert_record(char *buf, Context *context);
 
     void insert_record(const Rid &rid, char *buf);
@@ -134,7 +139,7 @@ class RmFileHandle {
 
     void reserve_memory_records(size_t count);
 
-    std::vector<Rid> snapshot_rids() const;
+    std::shared_ptr<const std::vector<Rid>> snapshot_rids() const;
 
     RmPageHandle create_new_page_handle();
 
@@ -165,8 +170,50 @@ class RmFileHandle {
 
     bool record_exists_on_page(const Rid &rid, const RmPageHandle &page_handle) const;
 
+    static bool rid_less(const Rid &lhs, const Rid &rhs) {
+        if (lhs.page_no != rhs.page_no) {
+            return lhs.page_no < rhs.page_no;
+        }
+        return lhs.slot_no < rhs.slot_no;
+    }
+
+    static void insert_rid_sorted(std::vector<Rid> &rids, const Rid &rid) {
+        auto pos = std::lower_bound(rids.begin(), rids.end(), rid, rid_less);
+        if (pos == rids.end() || pos->page_no != rid.page_no || pos->slot_no != rid.slot_no) {
+            rids.insert(pos, rid);
+        }
+    }
+
+    static void erase_rid_sorted(std::vector<Rid> &rids, const Rid &rid) {
+        auto pos = std::lower_bound(rids.begin(), rids.end(), rid, rid_less);
+        if (pos != rids.end() && pos->page_no == rid.page_no && pos->slot_no == rid.slot_no) {
+            rids.erase(pos);
+        }
+    }
+
     static int64_t memory_key(const Rid &rid) {
         return (static_cast<int64_t>(rid.page_no) << 32) | static_cast<uint32_t>(rid.slot_no);
+    }
+
+    static size_t slot_index(const Rid &rid, const RmFileHdr &file_hdr) {
+        return static_cast<size_t>(rid.page_no - RM_FIRST_RECORD_PAGE) *
+                   static_cast<size_t>(file_hdr.num_records_per_page) +
+               static_cast<size_t>(rid.slot_no);
+    }
+
+    static bool valid_slot_index(const Rid &rid, const RmFileHdr &file_hdr) {
+        return rid.page_no >= RM_FIRST_RECORD_PAGE && rid.page_no < file_hdr.num_pages &&
+               rid.slot_no >= 0 && rid.slot_no < file_hdr.num_records_per_page;
+    }
+
+    static void ensure_record_slots_size(SharedRecordState &state, const RmFileHdr &file_hdr) {
+        size_t page_count = file_hdr.num_pages > RM_FIRST_RECORD_PAGE
+                                ? static_cast<size_t>(file_hdr.num_pages - RM_FIRST_RECORD_PAGE)
+                                : 0;
+        size_t slot_count = page_count * static_cast<size_t>(file_hdr.num_records_per_page);
+        if (state.record_slots.size() < slot_count) {
+            state.record_slots.resize(slot_count);
+        }
     }
 
     static Rid key_to_rid(int64_t key) {

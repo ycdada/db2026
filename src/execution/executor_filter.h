@@ -24,6 +24,7 @@ class FilterExecutor : public AbstractExecutor {
    private:
     std::unique_ptr<AbstractExecutor> prev_;   // 子节点
     std::vector<Condition> conds_;             // 过滤条件
+    ConditionEvaluator cond_eval_;
     std::unique_ptr<RmRecord> cur_;            // 当前满足条件的记录缓存
     bool is_end_ = true;
 
@@ -31,7 +32,7 @@ class FilterExecutor : public AbstractExecutor {
     void find_next_valid() {
         while (!prev_->is_end()) {
             auto rec = prev_->Next();
-            if (rec != nullptr && eval_conds(rec->data, prev_->cols(), conds_)) {
+            if (rec != nullptr && cond_eval_.eval(rec->data)) {
                 cur_ = std::move(rec);
                 is_end_ = false;
                 return;
@@ -46,6 +47,7 @@ class FilterExecutor : public AbstractExecutor {
     FilterExecutor(std::unique_ptr<AbstractExecutor> prev, std::vector<Condition> conds) {
         prev_ = std::move(prev);
         conds_ = std::move(conds);
+        cond_eval_.bind(prev_->cols(), conds_);
     }
 
     void beginTuple() override {

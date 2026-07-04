@@ -35,11 +35,12 @@ class AggregateExecutor : public AbstractExecutor {
     size_t len_ = 0;
     std::vector<std::unique_ptr<RmRecord>> results_;
     size_t pos_ = 0;
+    std::vector<const ColMeta *> agg_arg_cols_;
+    std::vector<const ColMeta *> group_col_metas_;
 
     std::string group_key(const RmRecord &rec) const {
         std::string key;
-        for (auto &group_col : group_cols_) {
-            auto meta = find_col(prev_->cols(), group_col);
+        for (auto *meta : group_col_metas_) {
             key.append(rec.data + meta->offset, meta->len);
             key.push_back('\0');
         }
@@ -56,11 +57,25 @@ class AggregateExecutor : public AbstractExecutor {
         return pos;
     }
 
-    void update_agg(AggState &state, const AggCall &call, const RmRecord &rec) {
+    void bind_input_cols() {
+        agg_arg_cols_.clear();
+        agg_arg_cols_.reserve(agg_calls_.size());
+        for (auto &call : agg_calls_) {
+            agg_arg_cols_.push_back(call.type == AGG_COUNT ? nullptr : &*find_col(prev_->cols(), call.col));
+        }
+        group_col_metas_.clear();
+        group_col_metas_.reserve(group_cols_.size());
+        for (auto &group_col : group_cols_) {
+            group_col_metas_.push_back(&*find_col(prev_->cols(), group_col));
+        }
+    }
+
+    void update_agg(AggState &state, size_t agg_idx, const RmRecord &rec) {
+        const AggCall &call = agg_calls_[agg_idx];
         state.count++;
         if (call.type == AGG_COUNT) return;
 
-        auto meta = find_col(prev_->cols(), call.col);
+        auto meta = agg_arg_cols_[agg_idx];
         if (meta->type == TYPE_INT) {
             int v = *(int *)(rec.data + meta->offset);
             state.sum += v;
@@ -214,17 +229,61 @@ class AggregateExecutor : public AbstractExecutor {
             cols_.push_back(col);
         }
         len_ = offset;
+        bind_input_cols();
     }
 
     void beginTuple() override {
         results_.clear();
+        pos_ = 0;
+        constexpr size_t AGG_BATCH_SIZE = 256;
+        std::vector<std::unique_ptr<RmRecord>> batch;
+        batch.reserve(AGG_BATCH_SIZE);
+
+        if (group_cols_.empty()) {
+            GroupState group;
+            group.aggs.resize(agg_calls_.size());
+
+            prev_->beginTuple();
+            while (true) {
+                size_t batch_size = prev_->NextBatch(batch, AGG_BATCH_SIZE);
+                if (batch_size == 0) {
+                    break;
+                }
+                for (auto &rec : batch) {
+                    if (rec == nullptr) {
+                        continue;
+                    }
+                    if (group.first_rec == nullptr) {
+                        group.first_rec = std::make_unique<RmRecord>(*rec);
+                    }
+                    for (size_t i = 0; i < agg_calls_.size(); i++) {
+                        update_agg(group.aggs[i], i, *rec);
+                    }
+                }
+            }
+            if (group.first_rec == nullptr) {
+                group.first_rec = std::make_unique<RmRecord>(prev_->tupleLen());
+                memset(group.first_rec->data, 0, prev_->tupleLen());
+            }
+            if (pass_having(group)) {
+                results_.push_back(build_record(group));
+            }
+            return;
+        }
+
         std::vector<GroupState> groups;
         std::map<std::string, size_t> group_pos;
 
         prev_->beginTuple();
-        while (!prev_->is_end()) {
-            auto rec = prev_->Next();
-            if (rec != nullptr) {
+        while (true) {
+            size_t batch_size = prev_->NextBatch(batch, AGG_BATCH_SIZE);
+            if (batch_size == 0) {
+                break;
+            }
+            for (auto &rec : batch) {
+                if (rec == nullptr) {
+                    continue;
+                }
                 std::string key = group_key(*rec);
                 auto it = group_pos.find(key);
                 if (it == group_pos.end()) {
@@ -236,10 +295,9 @@ class AggregateExecutor : public AbstractExecutor {
                 }
                 auto &group = groups[it->second];
                 for (size_t i = 0; i < agg_calls_.size(); i++) {
-                    update_agg(group.aggs[i], agg_calls_[i], *rec);
+                    update_agg(group.aggs[i], i, *rec);
                 }
             }
-            prev_->nextTuple();
         }
 
         if (groups.empty() && group_cols_.empty()) {
@@ -255,7 +313,6 @@ class AggregateExecutor : public AbstractExecutor {
                 results_.push_back(build_record(group));
             }
         }
-        pos_ = 0;
     }
 
     void nextTuple() override {

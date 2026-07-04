@@ -1192,7 +1192,13 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             }
             case WType::DELETE_TUPLE: {
                 RmRecord &old_rec = write_record->GetRecord();
-                fh->insert_record(rid, old_rec.data);
+                if (fh->is_record(rid)) {
+                    auto curr_rec = fh->get_record(rid, nullptr);
+                    delete_index_entries(sm_manager_, tab_name, tab, *curr_rec, txn);
+                    fh->update_record(rid, old_rec.data, nullptr);
+                } else {
+                    fh->insert_record(rid, old_rec.data);
+                }
                 insert_index_entries(sm_manager_, tab_name, tab, old_rec, rid, txn);
                 break;
             }

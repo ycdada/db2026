@@ -87,7 +87,7 @@ class Portal
                     
                 case T_Update:
                 {
-                    std::unique_ptr<AbstractExecutor> scan= convert_plan_executor(x->subplan_, context);
+                    std::unique_ptr<AbstractExecutor> scan= convert_plan_executor(x->subplan_, context, false);
                     std::vector<Rid> rids;
 	                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
 	                        rids.push_back(scan->rid());
@@ -99,7 +99,7 @@ class Portal
                 }
                 case T_Delete:
                 {
-                    std::unique_ptr<AbstractExecutor> scan= convert_plan_executor(x->subplan_, context);
+                    std::unique_ptr<AbstractExecutor> scan= convert_plan_executor(x->subplan_, context, false);
                     std::vector<Rid> rids;
 	                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
 	                        rids.push_back(scan->rid());
@@ -180,46 +180,56 @@ class Portal
     void drop(){}
 
 
-    std::unique_ptr<AbstractExecutor> convert_plan_executor(std::shared_ptr<Plan> plan, Context *context)
+    std::unique_ptr<AbstractExecutor> convert_plan_executor(std::shared_ptr<Plan> plan, Context *context,
+                                                            bool acquire_read_locks = true,
+                                                            bool use_update_read_locks = true)
     {
         if(auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)){
-            return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context),
+            return std::make_unique<ProjectionExecutor>(
+                convert_plan_executor(x->subplan_, context, acquire_read_locks, use_update_read_locks),
                                                         x->sel_cols_, x->is_star_);
         } else if(auto x = std::dynamic_pointer_cast<RenamePlan>(plan)) {
-            return std::make_unique<RenameExecutor>(convert_plan_executor(x->subplan_, context), x->cols_);
+            return std::make_unique<RenameExecutor>(
+                convert_plan_executor(x->subplan_, context, acquire_read_locks, use_update_read_locks), x->cols_);
         } else if(auto x = std::dynamic_pointer_cast<FilterPlan>(plan)) {
             // 题目四：过滤节点
-            return std::make_unique<FilterExecutor>(convert_plan_executor(x->subplan_, context), x->conds_);
+            return std::make_unique<FilterExecutor>(
+                convert_plan_executor(x->subplan_, context, acquire_read_locks, use_update_read_locks), x->conds_);
         } else if(auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
             if(x->tag == T_SeqScan) {
-                return std::make_unique<SeqScanExecutor>(sm_manager_, x->tab_name_, x->conds_, context);
+                return std::make_unique<SeqScanExecutor>(sm_manager_, x->tab_name_, x->conds_, context,
+                                                         acquire_read_locks, use_update_read_locks);
             }
             else {
                 return std::make_unique<IndexScanExecutor>(sm_manager_, x->tab_name_, x->conds_,
                                                            x->index_col_names_, context,
-                                                           x->is_join_inner_, x->join_outer_col_, x->join_inner_col_);
+                                                           x->is_join_inner_, x->join_outer_col_, x->join_inner_col_,
+                                                           acquire_read_locks, use_update_read_locks);
             }
         } else if(auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
-            std::unique_ptr<AbstractExecutor> left = convert_plan_executor(x->left_, context);
-            std::unique_ptr<AbstractExecutor> right = convert_plan_executor(x->right_, context);
+            std::unique_ptr<AbstractExecutor> left = convert_plan_executor(x->left_, context, acquire_read_locks, false);
+            std::unique_ptr<AbstractExecutor> right = convert_plan_executor(x->right_, context, acquire_read_locks, false);
             std::unique_ptr<AbstractExecutor> join = std::make_unique<NestedLoopJoinExecutor>(
                                 std::move(left),
                                 std::move(right), x->conds_);
             return join;
         } else if(auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
-            return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context), 
+            return std::make_unique<SortExecutor>(
+                convert_plan_executor(x->subplan_, context, acquire_read_locks, use_update_read_locks),
                                             x->order_bys_);
         } else if(auto x = std::dynamic_pointer_cast<UnionPlan>(plan)) {
             std::vector<std::unique_ptr<AbstractExecutor>> children;
             for (auto &child : x->children_) {
-                children.push_back(convert_plan_executor(child, context));
+                children.push_back(convert_plan_executor(child, context, acquire_read_locks, use_update_read_locks));
             }
             return std::make_unique<UnionExecutor>(std::move(children), x->output_cols_);
         } else if(auto x = std::dynamic_pointer_cast<AggregatePlan>(plan)) {
-            return std::make_unique<AggregateExecutor>(convert_plan_executor(x->subplan_, context),
+            return std::make_unique<AggregateExecutor>(
+                convert_plan_executor(x->subplan_, context, acquire_read_locks, use_update_read_locks),
                                             x->select_terms_, x->agg_calls_, x->group_cols_, x->having_conds_);
         } else if(auto x = std::dynamic_pointer_cast<LimitPlan>(plan)) {
-            return std::make_unique<LimitExecutor>(convert_plan_executor(x->subplan_, context), x->limit_);
+            return std::make_unique<LimitExecutor>(
+                convert_plan_executor(x->subplan_, context, acquire_read_locks, use_update_read_locks), x->limit_);
         }
         return nullptr;
     }

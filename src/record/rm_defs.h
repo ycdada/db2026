@@ -16,7 +16,6 @@ See the Mulan PSL v2 for more details. */
 constexpr int RM_NO_PAGE = -1;
 constexpr int RM_FILE_HDR_PAGE = 0;
 constexpr int RM_FIRST_RECORD_PAGE = 1;
-constexpr int RM_MAX_RECORD_SIZE = 512;
 
 struct TupleMeta {
     timestamp_t ts_;
@@ -43,6 +42,9 @@ struct RmPageHdr {
     int next_free_page_no;  // 当前页面满了之后，下一个包含空闲空间的页面号（初始化为-1）
     int num_records;        // 当前页面中当前已经存储的记录个数（初始化为0）
 };
+
+constexpr int RM_MAX_RECORD_SIZE =
+    PAGE_SIZE - static_cast<int>(Page::OFFSET_PAGE_HDR) - static_cast<int>(sizeof(RmPageHdr)) - 1;
 
 /* 表中的记录 */
 struct RmRecord {

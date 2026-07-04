@@ -32,6 +32,8 @@ class RmManager {
      * @param {int} record_size 表中记录的大小
      */ 
     void create_file(const std::string& filename, int record_size) {
+        const int page_payload_size =
+            PAGE_SIZE - static_cast<int>(Page::OFFSET_PAGE_HDR) - static_cast<int>(sizeof(RmPageHdr));
         if (record_size < 1 || record_size > RM_MAX_RECORD_SIZE) {
             throw InvalidRecordSizeError(record_size);
         }
@@ -43,9 +45,13 @@ class RmManager {
         file_hdr.record_size = record_size;
         file_hdr.num_pages = 1;
         file_hdr.first_free_page_no = RM_NO_PAGE;
-        // We have: sizeof(hdr) + (n + 7) / 8 + n * record_size <= PAGE_SIZE
+        // We have: page header + bitmap + n * record_size <= PAGE_SIZE.
         file_hdr.num_records_per_page =
-            (BITMAP_WIDTH * (PAGE_SIZE - 1 - (int)sizeof(RmFileHdr)) + 1) / (1 + record_size * BITMAP_WIDTH);
+            (BITMAP_WIDTH * (page_payload_size - 1) + 1) / (1 + record_size * BITMAP_WIDTH);
+        if (file_hdr.num_records_per_page < 1) {
+            disk_manager_->close_file(fd);
+            throw InvalidRecordSizeError(record_size);
+        }
         file_hdr.bitmap_size = (file_hdr.num_records_per_page + BITMAP_WIDTH - 1) / BITMAP_WIDTH;
 
         // 将file header写入磁盘文件（名为file name，文件描述符为fd）中的第0页

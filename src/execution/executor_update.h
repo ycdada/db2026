@@ -28,6 +28,7 @@ class UpdateExecutor : public AbstractExecutor {
     std::vector<const ColMeta *> set_lhs_cols_;
     std::vector<const ColMeta *> set_rhs_cols_;
     std::vector<IxIndexHandle *> index_handles_;
+    ConditionEvaluator cond_eval_;
 
     bool index_key_changed(const IndexMeta &index, const RmRecord &old_rec, const RmRecord &new_rec) const {
         for (int i = 0; i < index.col_num; ++i) {
@@ -82,6 +83,7 @@ class UpdateExecutor : public AbstractExecutor {
             set_lhs_cols_.push_back(lhs_meta);
             set_rhs_cols_.push_back(rhs_meta);
         }
+        cond_eval_.bind(tab_->cols, conds_);
     }
     std::unique_ptr<RmRecord> Next() override {
         for (auto &rid : rids_) {
@@ -113,7 +115,7 @@ class UpdateExecutor : public AbstractExecutor {
             if (old_rec == nullptr) {
                 continue;
             }
-            if (!eval_conds(old_rec->data, tab_->cols, conds_)) {
+            if (!cond_eval_.eval(old_rec->data)) {
                 continue;
             }
             auto new_rec = std::make_unique<RmRecord>(fh_->get_file_hdr().record_size, old_rec->data);

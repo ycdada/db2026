@@ -241,7 +241,16 @@ bool plan_invalidates_cache(const std::shared_ptr<Plan> &plan) {
 }
 
 bool is_plan_cacheable(const std::shared_ptr<Plan> &plan) {
-    return std::dynamic_pointer_cast<DMLPlan>(plan) != nullptr;
+    if (std::dynamic_pointer_cast<DMLPlan>(plan) != nullptr) {
+        return true;
+    }
+    if (auto other = std::dynamic_pointer_cast<OtherPlan>(plan)) {
+        return other->tag == T_Transaction_begin ||
+               other->tag == T_Transaction_commit ||
+               other->tag == T_Transaction_abort ||
+               other->tag == T_Transaction_rollback;
+    }
+    return false;
 }
 
 uint64_t current_plan_cache_version() {

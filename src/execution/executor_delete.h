@@ -25,6 +25,7 @@ class DeleteExecutor : public AbstractExecutor {
     std::string tab_name_;          // 表名称
     SmManager *sm_manager_;
     std::vector<IxIndexHandle *> index_handles_;
+    ConditionEvaluator cond_eval_;
 
     [[noreturn]] void abort_mvcc_statement() {
         auto txn = context_ != nullptr ? context_->txn_ : nullptr;
@@ -52,6 +53,7 @@ class DeleteExecutor : public AbstractExecutor {
             index_handles_.push_back(
                 sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get());
         }
+        cond_eval_.bind(tab_->cols, conds_);
     }
 
     std::unique_ptr<RmRecord> Next() override {
@@ -85,7 +87,7 @@ class DeleteExecutor : public AbstractExecutor {
             if (rec == nullptr) {
                 continue;
             }
-            if (!eval_conds(rec->data, tab_->cols, conds_)) {
+            if (!cond_eval_.eval(rec->data)) {
                 continue;
             }
             if (mvcc) {

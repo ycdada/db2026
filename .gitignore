@@ -1,4 +1,9 @@
 build/
+build-profile/
+perf.data*
+*.folded
+flamegraph*.svg
+profile/
 .vscode/
 DB2025/
 test_explain/

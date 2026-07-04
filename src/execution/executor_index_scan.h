@@ -28,9 +28,11 @@ class IndexScanExecutor : public AbstractExecutor {
     TabMeta *tab_;                              // 表的元数据
     std::vector<Condition> conds_;              // 扫描条件
     RmFileHandle *fh_;                          // 表的数据文件句柄
+    int tab_fd_ = -1;
     std::vector<ColMeta> cols_;                 // 需要读取的字段
     size_t len_;                                // 选取出来的一条记录的长度
     std::vector<Condition> fed_conds_;          // 扫描条件，和conds_字段相同
+    ConditionEvaluator cond_eval_;
 
     std::vector<std::string> index_col_names_;  // index scan涉及到的索引包含的字段
     IndexMeta index_meta_;                      // index scan涉及到的索引元数据
@@ -61,10 +63,21 @@ class IndexScanExecutor : public AbstractExecutor {
     std::string join_inner_col_;
     Value join_key_val_;
     bool use_2pl_locks_ = false;
+    bool use_update_read_locks_ = false;
     bool is_mvcc_txn_ = false;
 
     bool use_2pl_locks() const {
         return use_2pl_locks_;
+    }
+
+    bool use_short_read_locks() const {
+        return context_ != nullptr && context_->txn_ != nullptr &&
+               context_->txn_->get_isolation_level() == IsolationLevel::READ_COMMITTED &&
+               !use_update_read_locks();
+    }
+
+    bool use_update_read_locks() const {
+        return use_update_read_locks_;
     }
 
     void register_ser_read_once() {
@@ -99,9 +112,23 @@ class IndexScanExecutor : public AbstractExecutor {
 
     bool load_visible_rid(const Rid &rid) {
         seen_rids_.insert({rid.page_no, rid.slot_no});
+        bool release_read_lock = false;
+        LockDataId read_lock_id(tab_fd_, rid, LockDataType::RECORD);
         if (use_2pl_locks()) {
-            context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid, fh_->GetFd());
+            bool already_locked = context_->txn_->get_lock_set()->count(read_lock_id) != 0;
+            if (use_update_read_locks()) {
+                context_->lock_mgr_->lock_update_on_record(context_->txn_, rid, tab_fd_);
+            } else {
+                context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid, tab_fd_);
+            }
+            release_read_lock = use_short_read_locks() && !already_locked;
         }
+        auto release_short_read_lock = [&]() {
+            if (release_read_lock) {
+                context_->lock_mgr_->unlock(context_->txn_, read_lock_id, false);
+                release_read_lock = false;
+            }
+        };
         std::unique_ptr<RmRecord> rec;
         std::shared_ptr<const RmRecord> rec_handle;
         const char *rec_data = nullptr;
@@ -115,22 +142,28 @@ class IndexScanExecutor : public AbstractExecutor {
                     rec_data = rec->data;
                 }
             } else {
-                rec_handle = fh_->get_record_handle(rid, context_);
+                rec_handle = fh_->get_record_handle_fast(rid);
                 if (rec_handle != nullptr) {
                     rec_data = rec_handle->data;
                 }
             }
         } catch (const RecordNotFoundError &) {
+            release_short_read_lock();
             return false;
+        } catch (...) {
+            release_short_read_lock();
+            throw;
         }
-        if (rec_data != nullptr && eval_conds(rec_data, cols_, fed_conds_)) {
+        if (rec_data != nullptr && cond_eval_.eval(rec_data)) {
             cur_rec_ = std::move(rec);
             cur_rec_handle_ = std::move(rec_handle);
             rid_ = rid;
             returned_rids_.push_back(rid_);
             end_ = false;
+            release_short_read_lock();
             return true;
         }
+        release_short_read_lock();
         return false;
     }
 
@@ -248,7 +281,9 @@ class IndexScanExecutor : public AbstractExecutor {
 
    public:
     IndexScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds, std::vector<std::string> index_col_names,
-                    Context *context, bool is_join_inner = false, TabCol join_outer_col = {}, std::string join_inner_col = "") {
+                    Context *context, bool is_join_inner = false, TabCol join_outer_col = {},
+                    std::string join_inner_col = "", bool acquire_read_locks = true,
+                    bool use_update_read_locks = true) {
         sm_manager_ = sm_manager;
         context_ = context;
         tab_name_ = std::move(tab_name);
@@ -261,6 +296,7 @@ class IndexScanExecutor : public AbstractExecutor {
         lower_key_.resize(index_meta_.col_tot_len);
         upper_key_.resize(index_meta_.col_tot_len);
         fh_ = sm_manager_->fhs_.at(tab_name_).get();
+        tab_fd_ = fh_->GetFd();
         cols_ = tab_->cols;
         len_ = cols_.back().offset + cols_.back().len;
         is_join_inner_ = is_join_inner;
@@ -268,8 +304,12 @@ class IndexScanExecutor : public AbstractExecutor {
         join_inner_col_ = std::move(join_inner_col);
         is_mvcc_txn_ = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
-        use_2pl_locks_ = context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
+        use_2pl_locks_ = acquire_read_locks &&
+                         context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
                          (context_->txn_mgr_ == nullptr || !is_mvcc_txn_);
+        use_update_read_locks_ = use_2pl_locks_ && use_update_read_locks &&
+                                 context_->txn_->get_isolation_level() == IsolationLevel::READ_COMMITTED &&
+                                 context_->txn_->get_txn_mode();
         for (auto &cond : conds_) {
             if (cond.lhs_col.tab_name != tab_name_) {
                 // lhs is on other table, now rhs must be on this table
@@ -314,6 +354,7 @@ class IndexScanExecutor : public AbstractExecutor {
             cond.rhs_val = join_key_val_;
             fed_conds_.push_back(cond);
         }
+        cond_eval_.bind(cols_, fed_conds_);
         returned_rids_.clear();
         ser_read_registered_ = false;
         seen_rids_.clear();

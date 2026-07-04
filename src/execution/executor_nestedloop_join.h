@@ -26,6 +26,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     std::vector<ColMeta> cols_;                 // join后获得的记录的字段
 
     std::vector<Condition> fed_conds_;          // join条件
+    ConditionEvaluator cond_eval_;
     bool isend;
 
     // 缓存当前匹配的左、右记录，用于Next()拼接
@@ -44,7 +45,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
                 auto joined = std::make_unique<RmRecord>(len_);
                 memcpy(joined->data, left_rec_->data, left_->tupleLen());
                 memcpy(joined->data + left_->tupleLen(), cur_right->data, right_->tupleLen());
-                if (eval_conds(joined->data, cols_, fed_conds_)) {
+                if (cond_eval_.eval(joined->data)) {
                     right_rec_ = std::move(cur_right);
                     isend = false;
                     return;
@@ -77,6 +78,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         cols_.insert(cols_.end(), right_cols.begin(), right_cols.end());
         isend = false;
         fed_conds_ = std::move(conds);
+        cond_eval_.bind(cols_, fed_conds_);
     }
 
     void beginTuple() override {
