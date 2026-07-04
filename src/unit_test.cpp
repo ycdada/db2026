@@ -32,6 +32,7 @@ See the Mulan PSL v2 for more details. */
 #include <unordered_map>
 #include <vector>
 
+#include "execution/executor_aggregate.h"
 #include "gtest/gtest.h"
 #include "replacer/lru_replacer.h"
 #include "storage/disk_manager.h"
@@ -43,6 +44,41 @@ const std::string TEST_FILE_NAME_BIG = "bigdata";             // 测试文件的
 constexpr int MAX_FILES = 32;
 constexpr int MAX_PAGES = 128;
 constexpr size_t TEST_BUFFER_POOL_SIZE = MAX_FILES * MAX_PAGES;
+
+class MockExecutor final : public AbstractExecutor {
+   public:
+    MockExecutor(std::vector<ColMeta> cols, size_t tuple_len, std::vector<std::unique_ptr<RmRecord>> rows)
+        : cols_(std::move(cols)), tuple_len_(tuple_len), rows_(std::move(rows)) {}
+
+    void beginTuple() override { pos_ = 0; }
+
+    void nextTuple() override {
+        if (pos_ < rows_.size()) {
+            pos_++;
+        }
+    }
+
+    bool is_end() const override { return pos_ >= rows_.size(); }
+
+    std::unique_ptr<RmRecord> Next() override {
+        if (is_end()) {
+            return nullptr;
+        }
+        return std::make_unique<RmRecord>(*rows_[pos_]);
+    }
+
+    const std::vector<ColMeta> &cols() const override { return cols_; }
+
+    size_t tupleLen() const override { return tuple_len_; }
+
+    Rid &rid() override { return _abstract_rid; }
+
+   private:
+    std::vector<ColMeta> cols_;
+    size_t tuple_len_ = 0;
+    std::vector<std::unique_ptr<RmRecord>> rows_;
+    size_t pos_ = 0;
+};
 
 // 创建BufferPoolManager
 auto disk_manager = std::make_unique<DiskManager>();
@@ -917,4 +953,55 @@ TEST(RecordManagerTest, ReopenRecreatedFileDoesNotReuseClosedCache) {
     new_handle.reset();
     old_handle.reset();
     rm_manager->destroy_file(filename);
+}
+
+TEST(AggregateExecutorTest, EmptyMinProducesNoRows) {
+    ColMeta input_col{.tab_name = "t", .name = "x", .type = TYPE_INT, .len = sizeof(int), .offset = 0, .index = false};
+    auto child = std::make_unique<MockExecutor>(std::vector<ColMeta>{input_col}, sizeof(int),
+                                                std::vector<std::unique_ptr<RmRecord>>{});
+
+    SelectTerm out_term;
+    out_term.is_agg = true;
+    out_term.agg_idx = 0;
+    out_term.output_name = "min_x";
+    out_term.type = TYPE_INT;
+    out_term.len = sizeof(int);
+
+    AggCall min_call;
+    min_call.type = AGG_MIN;
+    min_call.col = {.tab_name = "t", .col_name = "x"};
+    min_call.arg_type = TYPE_INT;
+    min_call.result_type = TYPE_INT;
+    min_call.result_len = sizeof(int);
+
+    AggregateExecutor exec(std::move(child), {out_term}, {min_call}, {}, {});
+    exec.beginTuple();
+    EXPECT_TRUE(exec.is_end());
+    EXPECT_EQ(exec.Next(), nullptr);
+}
+
+TEST(AggregateExecutorTest, EmptyCountStillReturnsZero) {
+    ColMeta input_col{.tab_name = "t", .name = "x", .type = TYPE_INT, .len = sizeof(int), .offset = 0, .index = false};
+    auto child = std::make_unique<MockExecutor>(std::vector<ColMeta>{input_col}, sizeof(int),
+                                                std::vector<std::unique_ptr<RmRecord>>{});
+
+    SelectTerm out_term;
+    out_term.is_agg = true;
+    out_term.agg_idx = 0;
+    out_term.output_name = "cnt";
+    out_term.type = TYPE_INT;
+    out_term.len = sizeof(int);
+
+    AggCall count_call;
+    count_call.type = AGG_COUNT;
+    count_call.is_star = true;
+    count_call.result_type = TYPE_INT;
+    count_call.result_len = sizeof(int);
+
+    AggregateExecutor exec(std::move(child), {out_term}, {count_call}, {}, {});
+    exec.beginTuple();
+    ASSERT_FALSE(exec.is_end());
+    auto rec = exec.Next();
+    ASSERT_NE(rec, nullptr);
+    EXPECT_EQ(*reinterpret_cast<int *>(rec->data), 0);
 }

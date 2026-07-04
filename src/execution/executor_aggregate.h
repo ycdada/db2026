@@ -38,6 +38,15 @@ class AggregateExecutor : public AbstractExecutor {
     std::vector<const ColMeta *> agg_arg_cols_;
     std::vector<const ColMeta *> group_col_metas_;
 
+    bool should_emit_empty_row_without_group() const {
+        for (const auto &call : agg_calls_) {
+            if (call.type == AGG_MIN || call.type == AGG_MAX) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     std::string group_key(const RmRecord &rec) const {
         std::string key;
         for (auto *meta : group_col_metas_) {
@@ -262,6 +271,9 @@ class AggregateExecutor : public AbstractExecutor {
                 }
             }
             if (group.first_rec == nullptr) {
+                if (!should_emit_empty_row_without_group()) {
+                    return;
+                }
                 group.first_rec = std::make_unique<RmRecord>(prev_->tupleLen());
                 memset(group.first_rec->data, 0, prev_->tupleLen());
             }
