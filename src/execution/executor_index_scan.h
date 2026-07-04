@@ -253,8 +253,13 @@ class IndexScanExecutor : public AbstractExecutor {
             return;
         }
         while (scan_ != nullptr && !scan_->is_end()) {
-            if (load_visible_index_current()) {
-                return;
+            try {
+                if (load_visible_index_current()) {
+                    return;
+                }
+            } catch (const IndexEntryNotFoundError &) {
+                // A concurrent writer may remove the index slot after this scan positioned its cursor.
+                // Treat the vanished entry like a non-visible tuple and continue from the next slot.
             }
             scan_->next();
         }
