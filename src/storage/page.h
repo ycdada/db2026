@@ -52,8 +52,8 @@ class Page {
     friend class BufferPoolManager;
 
    public:
-    
-    Page() { reset_memory(); }
+
+    Page() = default;
 
     ~Page() = default;
 
@@ -80,11 +80,11 @@ class Page {
     /** The actual data that is stored within a page.
      *  该页面在bufferPool中的偏移地址
      */
-    char data_[PAGE_SIZE] = {};
+    char data_[PAGE_SIZE];
 
     /** 脏页判断 */
-    bool is_dirty_ = false;
+    bool is_dirty_;
 
     /** The pin count of this page. */
-    int pin_count_ = 0;
+    int pin_count_;
 };

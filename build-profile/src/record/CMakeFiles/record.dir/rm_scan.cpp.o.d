@@ -177,10 +177,7 @@ src/record/CMakeFiles/record.dir/rm_scan.cpp.o: \
  /usr/include/x86_64-linux-gnu/bits/unistd.h \
  /usr/include/x86_64-linux-gnu/bits/unistd_ext.h \
  /usr/include/linux/close_range.h /usr/include/c++/11/cassert \
- /usr/include/assert.h /usr/include/c++/11/list \
- /usr/include/c++/11/bits/stl_list.h \
- /usr/include/c++/11/bits/allocated_ptr.h \
- /usr/include/c++/11/bits/list.tcc /usr/include/c++/11/memory \
+ /usr/include/assert.h /usr/include/c++/11/memory \
  /usr/include/c++/11/bits/stl_uninitialized.h \
  /usr/include/c++/11/bits/stl_tempbuf.h \
  /usr/include/c++/11/bits/stl_raw_storage_iter.h \
@@ -188,6 +185,7 @@ src/record/CMakeFiles/record.dir/rm_scan.cpp.o: \
  /usr/include/c++/11/bits/unique_ptr.h \
  /usr/include/c++/11/bits/shared_ptr.h \
  /usr/include/c++/11/bits/shared_ptr_base.h \
+ /usr/include/c++/11/bits/allocated_ptr.h \
  /usr/include/c++/11/bits/refwrap.h /usr/include/c++/11/ext/concurrence.h \
  /usr/include/c++/11/bits/shared_ptr_atomic.h \
  /usr/include/c++/11/bits/atomic_base.h \
@@ -229,8 +227,9 @@ src/record/CMakeFiles/record.dir/rm_scan.cpp.o: \
  /usr/include/x86_64-linux-gnu/bits/strings_fortified.h \
  /usr/include/x86_64-linux-gnu/bits/string_fortified.h \
  /home/tst/db2026/src/storage/page.h \
- /home/tst/db2026/src/replacer/lru_replacer.h /usr/include/c++/11/mutex \
- /usr/include/c++/11/bits/std_mutex.h \
+ /home/tst/db2026/src/replacer/lru_replacer.h /usr/include/c++/11/list \
+ /usr/include/c++/11/bits/stl_list.h /usr/include/c++/11/bits/list.tcc \
+ /usr/include/c++/11/mutex /usr/include/c++/11/bits/std_mutex.h \
  /usr/include/c++/11/bits/unique_lock.h \
  /home/tst/db2026/src/replacer/replacer.h \
  /home/tst/db2026/src/record/rm_file_handle.h \

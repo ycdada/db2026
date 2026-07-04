@@ -47,6 +47,11 @@ bool BufferPoolManager::find_victim_page(Shard& shard, frame_id_t* frame_id) {
         return true;
     }
 
+    if (shard.next_unused_frame_ < shard.frame_limit_) {
+        *frame_id = shard.next_unused_frame_++;
+        return true;
+    }
+
     // 没有空闲帧,使用LRU策略淘汰一个页面
     return shard.replacer_->victim(frame_id);
 }
@@ -57,19 +62,26 @@ bool BufferPoolManager::find_victim_page(Shard& shard, frame_id_t* frame_id) {
  * @param {PageId} new_page_id 新的page_id
  * @param {frame_id_t} new_frame_id 新的帧frame_id
  */
-void BufferPoolManager::update_page(Shard& shard, Page *page, PageId new_page_id, frame_id_t new_frame_id) {
+void BufferPoolManager::update_page(Shard& shard, Page *page, PageId new_page_id, frame_id_t new_frame_id, bool clear_data) {
     // Todo:
     // 1 如果是脏页，写回磁盘，并且把dirty置为false
     // 2 更新page table
     // 3 重置page的data，更新page id
 
-    // 如果是脏页,写回磁盘
-    if (page->is_dirty_) {
-        disk_manager_->write_page(page->id_.fd, page->id_.page_no, page->data_, PAGE_SIZE);
+    if (!frame_constructed_[new_frame_id]) {
+        new (page) Page();
+        frame_constructed_[new_frame_id] = 1;
     }
 
-    // 从页表中删除旧映射
-    shard.page_table_.erase(page->id_);
+    if (frame_mapped_[new_frame_id]) {
+        // 如果是脏页,写回磁盘
+        if (page->is_dirty_) {
+            disk_manager_->write_page(page->id_.fd, page->id_.page_no, page->data_, PAGE_SIZE);
+        }
+
+        // 从页表中删除旧映射
+        shard.page_table_.erase(page->id_);
+    }
 
     // 更新页表,添加新映射
     page->id_ = new_page_id;
@@ -78,7 +90,10 @@ void BufferPoolManager::update_page(Shard& shard, Page *page, PageId new_page_id
     // 重置页面数据
     page->pin_count_ = 0;     // 重置pin_count
     page->is_dirty_ = false;  // 重置脏页标志
-    page->reset_memory();
+    if (clear_data) {
+        page->reset_memory();
+    }
+    frame_mapped_[new_frame_id] = 1;
 }
 
 /**
@@ -127,7 +142,7 @@ Page* BufferPoolManager::fetch_page(PageId page_id) {
 
     // 获取victim frame对应的页面
     Page* page = &pages_[frame_id];
-    update_page(shard, page, page_id, frame_id);
+    update_page(shard, page, page_id, frame_id, false);
     disk_manager_->read_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
     page->pin_count_ = 1;  // 固定该页
     //! 本来就是新页不在缓存中，test中可以调用replacer_->unpin(frame_id)来固定该页，不保证
@@ -248,7 +263,7 @@ Page* BufferPoolManager::new_page(PageId* page_id) {
 
     // 获取frame对应的页面
     Page* page = &pages_[frame_id];
-    update_page(shard, page, *page_id, frame_id);
+    update_page(shard, page, *page_id, frame_id, true);
     page->pin_count_ = 1;  // 固定该页
     // INFO("new page: {}, pin_count: {}", page->get_page_id().page_no, page->pin_count_);
     //! 本来就是新页不在缓存中，test中可以调用replacer_->unpin(frame_id)来固定该页，不保证
@@ -271,7 +286,7 @@ Page* BufferPoolManager::new_page_at(PageId page_id) {
     }
 
     Page* page = &pages_[frame_id];
-    update_page(shard, page, page_id, frame_id);
+    update_page(shard, page, page_id, frame_id, true);
     page->pin_count_ = 1;
     shard.replacer_->pin(frame_id);
     return page;
@@ -310,11 +325,12 @@ bool BufferPoolManager::delete_page(PageId page_id) {
         disk_manager_->write_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
     }
 
-    // 重置页面元数据
-    page->id_.page_no = INVALID_PAGE_ID;
+    // 重置页面元数据；数据区延迟到新空页复用时再清零。
+    shard.replacer_->pin(frame_id);
+    page->id_ = PageId{-1, INVALID_PAGE_ID};
     page->pin_count_ = 0;
     page->is_dirty_ = false;
-    page->reset_memory();
+    frame_mapped_[frame_id] = 0;
 
     // 从页表中删除
     shard.page_table_.erase(iter);
@@ -363,10 +379,10 @@ void BufferPoolManager::delete_all_pages(int fd) {
             frame_id_t frame_id = it->second;
             Page *page = &pages_[frame_id];
             shard.replacer_->pin(frame_id);
-            page->id_.page_no = INVALID_PAGE_ID;
+            page->id_ = PageId{-1, INVALID_PAGE_ID};
             page->pin_count_ = 0;
             page->is_dirty_ = false;
-            page->reset_memory();
+            frame_mapped_[frame_id] = 0;
             shard.free_list_.push_back(frame_id);
             it = shard.page_table_.erase(it);
         }

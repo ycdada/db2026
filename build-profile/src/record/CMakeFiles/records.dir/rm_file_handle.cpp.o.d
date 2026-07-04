@@ -225,8 +225,7 @@ src/record/CMakeFiles/records.dir/rm_file_handle.cpp.o: \
  /usr/include/x86_64-linux-gnu/bits/getopt_core.h \
  /usr/include/x86_64-linux-gnu/bits/unistd.h \
  /usr/include/x86_64-linux-gnu/bits/unistd_ext.h \
- /usr/include/linux/close_range.h /usr/include/c++/11/list \
- /usr/include/c++/11/bits/stl_list.h /usr/include/c++/11/bits/list.tcc \
+ /usr/include/linux/close_range.h \
  /home/tst/db2026/src/storage/disk_manager.h \
  /usr/include/x86_64-linux-gnu/sys/stat.h \
  /usr/include/x86_64-linux-gnu/bits/statx.h /usr/include/linux/stat.h \
@@ -247,7 +246,8 @@ src/record/CMakeFiles/records.dir/rm_file_handle.cpp.o: \
  /usr/include/c++/11/bits/fstream.tcc \
  /home/tst/db2026/src/common/config.h /home/tst/db2026/src/errors.h \
  /home/tst/db2026/src/storage/page.h \
- /home/tst/db2026/src/replacer/lru_replacer.h \
+ /home/tst/db2026/src/replacer/lru_replacer.h /usr/include/c++/11/list \
+ /usr/include/c++/11/bits/stl_list.h /usr/include/c++/11/bits/list.tcc \
  /home/tst/db2026/src/replacer/replacer.h \
  /home/tst/db2026/src/transaction/txn_defs.h \
  /home/tst/db2026/src/transaction/concurrency/lock_manager.h \

@@ -328,6 +328,27 @@ TEST_F(BufferPoolManagerTest, SampleTest) {
     bpm->flush_all_pages(fd);
 }
 
+TEST_F(BufferPoolManagerTest, ReusedFrameNewPageIsZeroed) {
+    const size_t buffer_pool_size = 1;
+    auto disk_manager = BufferPoolManagerTest::disk_manager_.get();
+    auto bpm = std::make_unique<BufferPoolManager>(buffer_pool_size, disk_manager);
+    int fd = BufferPoolManagerTest::fd_;
+
+    PageId first_page_id = {.fd = fd, .page_no = INVALID_PAGE_ID};
+    Page *page = bpm->new_page(&first_page_id);
+    ASSERT_NE(nullptr, page);
+    std::memset(page->get_data(), 0x5a, PAGE_SIZE);
+    ASSERT_TRUE(bpm->unpin_page(first_page_id, true));
+    ASSERT_TRUE(bpm->delete_page(first_page_id));
+
+    PageId second_page_id = {.fd = fd, .page_no = INVALID_PAGE_ID};
+    Page *reused_page = bpm->new_page(&second_page_id);
+    ASSERT_NE(nullptr, reused_page);
+    EXPECT_TRUE(std::all_of(reused_page->get_data(), reused_page->get_data() + PAGE_SIZE,
+                            [](char value) { return value == 0; }));
+    EXPECT_TRUE(bpm->unpin_page(second_page_id, false));
+}
+
 /** 注意：每个测试点只测试了单个文件！
  * 对于每个测试点，先创建和进入目录TEST_DB_NAME
  * 然后在此目录下创建和打开文件TEST_FILE_NAME_CCUR，记录其文件描述符fd */

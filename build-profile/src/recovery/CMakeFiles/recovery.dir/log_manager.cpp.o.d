@@ -235,7 +235,7 @@ src/recovery/CMakeFiles/recovery.dir/log_manager.cpp.o: \
  /home/tst/db2026/src/record/rm_defs.h \
  /home/tst/db2026/src/storage/buffer_pool_manager.h \
  /usr/include/c++/11/cassert /usr/include/assert.h \
- /usr/include/c++/11/list /usr/include/c++/11/bits/stl_list.h \
- /usr/include/c++/11/bits/list.tcc /home/tst/db2026/src/storage/page.h \
- /home/tst/db2026/src/replacer/lru_replacer.h \
+ /home/tst/db2026/src/storage/page.h \
+ /home/tst/db2026/src/replacer/lru_replacer.h /usr/include/c++/11/list \
+ /usr/include/c++/11/bits/stl_list.h /usr/include/c++/11/bits/list.tcc \
  /home/tst/db2026/src/replacer/replacer.h

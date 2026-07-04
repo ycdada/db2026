@@ -202,9 +202,8 @@ src/optimizer/CMakeFiles/planner.dir/planner.cpp.o: \
  /usr/include/x86_64-linux-gnu/bits/getopt_core.h \
  /usr/include/x86_64-linux-gnu/bits/unistd.h \
  /usr/include/x86_64-linux-gnu/bits/unistd_ext.h \
- /usr/include/linux/close_range.h /usr/include/c++/11/list \
- /usr/include/c++/11/bits/stl_list.h /usr/include/c++/11/bits/list.tcc \
- /usr/include/c++/11/unordered_map /usr/include/c++/11/bits/hashtable.h \
+ /usr/include/linux/close_range.h /usr/include/c++/11/unordered_map \
+ /usr/include/c++/11/bits/hashtable.h \
  /usr/include/c++/11/bits/hashtable_policy.h \
  /usr/include/c++/11/bits/enable_special_members.h \
  /usr/include/c++/11/bits/unordered_map.h \
@@ -231,8 +230,9 @@ src/optimizer/CMakeFiles/planner.dir/planner.cpp.o: \
  /usr/include/c++/11/ratio /usr/include/c++/11/limits \
  /usr/include/c++/11/ctime /usr/include/c++/11/bits/parse_numbers.h \
  /home/tst/db2026/src/storage/page.h \
- /home/tst/db2026/src/replacer/lru_replacer.h /usr/include/c++/11/mutex \
- /usr/include/c++/11/bits/std_mutex.h \
+ /home/tst/db2026/src/replacer/lru_replacer.h /usr/include/c++/11/list \
+ /usr/include/c++/11/bits/stl_list.h /usr/include/c++/11/bits/list.tcc \
+ /usr/include/c++/11/mutex /usr/include/c++/11/bits/std_mutex.h \
  /usr/include/c++/11/bits/unique_lock.h \
  /home/tst/db2026/src/replacer/replacer.h \
  /home/tst/db2026/src/record/rm_manager.h \

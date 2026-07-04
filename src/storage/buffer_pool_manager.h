@@ -13,8 +13,8 @@ See the Mulan PSL v2 for more details. */
 #include <unistd.h>
 
 #include <cassert>
-#include <list>
 #include <memory>
+#include <new>
 #include <unordered_map>
 #include <vector>
 
@@ -28,36 +28,51 @@ class BufferPoolManager {
    private:
     struct Shard {
         std::unordered_map<PageId, frame_id_t, PageIdHash> page_table_;
-        std::list<frame_id_t> free_list_;
+        std::vector<frame_id_t> free_list_;
         std::unique_ptr<Replacer> replacer_;
         std::mutex latch_;
+        frame_id_t next_unused_frame_;
+        frame_id_t frame_limit_;
 
-        explicit Shard(size_t pool_size) : replacer_(std::make_unique<LRUReplacer>(pool_size)) {}
+        Shard(size_t pool_size, frame_id_t first_frame, frame_id_t frame_limit)
+            : replacer_(std::make_unique<LRUReplacer>(pool_size)),
+              next_unused_frame_(first_frame),
+              frame_limit_(frame_limit) {}
     };
 
     size_t pool_size_;      // buffer_pool中可容纳页面的个数，即帧的个数
     size_t shard_count_;
-    Page *pages_;           // buffer_pool中的Page对象数组，在构造空间中申请内存空间，在析构函数中释放，大小为BUFFER_POOL_SIZE
+    Page *pages_ = nullptr; // buffer_pool中的Page对象数组，在构造空间中申请内存空间，在析构函数中释放，大小为BUFFER_POOL_SIZE
+    std::vector<uint8_t> frame_mapped_;
+    std::vector<uint8_t> frame_constructed_;
     std::vector<std::unique_ptr<Shard>> shards_;
     DiskManager *disk_manager_;
 
    public:
     BufferPoolManager(size_t pool_size, DiskManager *disk_manager)
         : pool_size_(pool_size), shard_count_(choose_shard_count(pool_size)), disk_manager_(disk_manager) {
-        // 为buffer pool分配一块连续的内存空间
-        pages_ = new Page[pool_size_];
         shards_.reserve(shard_count_);
+        frame_id_t next_frame = 0;
         for (size_t i = 0; i < shard_count_; ++i) {
-            shards_.emplace_back(std::make_unique<Shard>(pool_size_));
+            size_t shard_frame_count = pool_size_ / shard_count_ + (i < pool_size_ % shard_count_ ? 1 : 0);
+            frame_id_t frame_limit = next_frame + static_cast<frame_id_t>(shard_frame_count);
+            shards_.emplace_back(std::make_unique<Shard>(pool_size_, next_frame, frame_limit));
+            shards_.back()->free_list_.reserve(shard_frame_count);
+            next_frame = frame_limit;
         }
-        // 初始化时，所有的page都在对应shard的free_list_中
-        for (size_t i = 0; i < pool_size_; ++i) {
-            shards_[i % shard_count_]->free_list_.emplace_back(static_cast<frame_id_t>(i));
-        }
+        frame_mapped_.assign(pool_size_, 0);
+        frame_constructed_.assign(pool_size_, 0);
+        // 为buffer pool保留连续存储空间，Page对象在frame首次使用时再构造。
+        pages_ = static_cast<Page*>(::operator new[](sizeof(Page) * pool_size_));
     }
 
     ~BufferPoolManager() {
-        delete[] pages_;
+        for (size_t i = 0; i < pool_size_; ++i) {
+            if (frame_constructed_[i]) {
+                pages_[i].~Page();
+            }
+        }
+        ::operator delete[](pages_);
     }
 
     /**
@@ -92,5 +107,5 @@ class BufferPoolManager {
 
     bool find_victim_page(Shard& shard, frame_id_t* frame_id);
 
-    void update_page(Shard& shard, Page* page, PageId new_page_id, frame_id_t new_frame_id);
+    void update_page(Shard& shard, Page* page, PageId new_page_id, frame_id_t new_frame_id, bool clear_data);
 };
