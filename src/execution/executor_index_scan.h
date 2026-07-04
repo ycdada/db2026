@@ -65,6 +65,7 @@ class IndexScanExecutor : public AbstractExecutor {
     bool use_2pl_locks_ = false;
     bool use_update_read_locks_ = false;
     bool is_mvcc_txn_ = false;
+    bool update_locks_require_full_eq_ = true;
 
     bool use_2pl_locks() const {
         return use_2pl_locks_;
@@ -305,7 +306,7 @@ class IndexScanExecutor : public AbstractExecutor {
     IndexScanExecutor(SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds, std::vector<std::string> index_col_names,
                     Context *context, bool is_join_inner = false, TabCol join_outer_col = {},
                     std::string join_inner_col = "", bool acquire_read_locks = true,
-                    bool use_update_read_locks = true) {
+                    bool use_update_read_locks = true, bool update_locks_require_full_eq = true) {
         sm_manager_ = sm_manager;
         context_ = context;
         tab_name_ = std::move(tab_name);
@@ -324,6 +325,7 @@ class IndexScanExecutor : public AbstractExecutor {
         is_join_inner_ = is_join_inner;
         join_outer_col_ = std::move(join_outer_col);
         join_inner_col_ = std::move(join_inner_col);
+        update_locks_require_full_eq_ = update_locks_require_full_eq;
         is_mvcc_txn_ = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
         use_2pl_locks_ = acquire_read_locks &&
@@ -344,7 +346,8 @@ class IndexScanExecutor : public AbstractExecutor {
                 }
             }
         }
-        use_update_read_locks_ = use_2pl_locks_ && use_update_read_locks && has_full_eq_lookup() &&
+        use_update_read_locks_ = use_2pl_locks_ && use_update_read_locks &&
+                                 (!update_locks_require_full_eq_ || has_full_eq_lookup()) &&
                                  context_->txn_->get_isolation_level() == IsolationLevel::READ_COMMITTED &&
                                  context_->txn_->get_txn_mode();
         fed_conds_ = conds_;
