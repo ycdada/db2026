@@ -39,6 +39,7 @@ class SeqScanExecutor : public AbstractExecutor {
     SmManager *sm_manager_;
     bool use_2pl_locks_ = false;
     bool use_update_read_locks_ = false;
+    TransactionManager::MvccTableMarkerSnapshot mvcc_marker_snapshot_;
 
     bool use_2pl_locks() const {
         return use_2pl_locks_;
@@ -91,7 +92,8 @@ class SeqScanExecutor : public AbstractExecutor {
             bool needs_mvcc_visibility = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                                          context_->txn_mgr_->HasMvccState() &&
                                          (is_mvcc_txn ||
-                                          context_->txn_mgr_->HasMvccEntry(tab_name_, current_rid));
+                                          context_->txn_mgr_->HasMvccEntry(tab_name_, current_rid,
+                                                                           mvcc_marker_snapshot_));
             if (needs_mvcc_visibility) {
                 visible = context_->txn_mgr_->GetVisibleRecord(
                     tab_name_, current_rid, context_->txn_,
@@ -139,6 +141,10 @@ class SeqScanExecutor : public AbstractExecutor {
         context_ = context;
         bool is_mvcc_txn = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                            context_->txn_mgr_->IsMvccTxn(context_->txn_);
+        if (!is_mvcc_txn && context_ != nullptr && context_->txn_mgr_ != nullptr &&
+            context_->txn_mgr_->HasMvccState()) {
+            mvcc_marker_snapshot_ = context_->txn_mgr_->GetMvccTableMarkerSnapshot(tab_name_);
+        }
         use_2pl_locks_ = acquire_read_locks &&
                          context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
                          (context_->txn_mgr_ == nullptr || !is_mvcc_txn);

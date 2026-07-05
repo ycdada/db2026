@@ -10,6 +10,7 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <array>
 #include <vector>
 #include <optional>
 #include <cstring>
@@ -135,15 +136,51 @@ inline bool eval_conds(const char *rec_data, const std::vector<ColMeta> &cols,
 
 class ConditionEvaluator {
    private:
-    struct BoundCond {
-        const ColMeta *lhs = nullptr;
-        const ColMeta *rhs_col = nullptr;
-        const Value *rhs_val = nullptr;
-        CompOp op = OP_EQ;
-        bool is_rhs_val = true;
+    struct IntValCond {
+        int offset = 0;
+        int value = 0;
     };
 
-    std::vector<BoundCond> conds_;
+    struct IntColCond {
+        int lhs_offset = 0;
+        int rhs_offset = 0;
+    };
+
+    struct FloatValCond {
+        int offset = 0;
+        float value = 0;
+    };
+
+    struct FloatColCond {
+        int lhs_offset = 0;
+        int rhs_offset = 0;
+    };
+
+    struct StringValCond {
+        int offset = 0;
+        int len = 0;
+        std::string value;
+    };
+
+    struct StringColCond {
+        int lhs_offset = 0;
+        int lhs_len = 0;
+        int rhs_offset = 0;
+        int rhs_len = 0;
+    };
+
+    bool invalid_ = false;
+    size_t cond_count_ = 0;
+    std::array<std::vector<IntValCond>, 6> int_vals_;
+    std::array<std::vector<IntColCond>, 6> int_cols_;
+    std::array<std::vector<FloatValCond>, 6> float_vals_;
+    std::array<std::vector<FloatColCond>, 6> float_cols_;
+    std::array<std::vector<StringValCond>, 6> string_vals_;
+    std::array<std::vector<StringColCond>, 6> string_cols_;
+
+    static size_t op_index(CompOp op) {
+        return static_cast<size_t>(op);
+    }
 
     static bool compare_int(int lhs, CompOp op, int rhs) {
         switch (op) {
@@ -186,6 +223,140 @@ class ConditionEvaluator {
         return std::string_view(data, strnlen(data, len));
     }
 
+    static bool fixed_string_equal(const char *data, int len, const std::string &value) {
+        if (static_cast<int>(value.size()) > len) {
+            return false;
+        }
+        if (!value.empty() && std::memcmp(data, value.data(), value.size()) != 0) {
+            return false;
+        }
+        return static_cast<int>(value.size()) == len || data[value.size()] == '\0';
+    }
+
+    static bool eval_int_vals(const char *rec_data, const std::array<std::vector<IntValCond>, 6> &conds) {
+        for (const auto &cond : conds[OP_EQ]) {
+            if (*(const int *)(rec_data + cond.offset) != cond.value) return false;
+        }
+        for (const auto &cond : conds[OP_NE]) {
+            if (*(const int *)(rec_data + cond.offset) == cond.value) return false;
+        }
+        for (const auto &cond : conds[OP_LT]) {
+            if (*(const int *)(rec_data + cond.offset) >= cond.value) return false;
+        }
+        for (const auto &cond : conds[OP_GT]) {
+            if (*(const int *)(rec_data + cond.offset) <= cond.value) return false;
+        }
+        for (const auto &cond : conds[OP_LE]) {
+            if (*(const int *)(rec_data + cond.offset) > cond.value) return false;
+        }
+        for (const auto &cond : conds[OP_GE]) {
+            if (*(const int *)(rec_data + cond.offset) < cond.value) return false;
+        }
+        return true;
+    }
+
+    static bool eval_int_cols(const char *rec_data, const std::array<std::vector<IntColCond>, 6> &conds) {
+        for (const auto &cond : conds[OP_EQ]) {
+            if (*(const int *)(rec_data + cond.lhs_offset) != *(const int *)(rec_data + cond.rhs_offset)) return false;
+        }
+        for (const auto &cond : conds[OP_NE]) {
+            if (*(const int *)(rec_data + cond.lhs_offset) == *(const int *)(rec_data + cond.rhs_offset)) return false;
+        }
+        for (const auto &cond : conds[OP_LT]) {
+            if (*(const int *)(rec_data + cond.lhs_offset) >= *(const int *)(rec_data + cond.rhs_offset)) return false;
+        }
+        for (const auto &cond : conds[OP_GT]) {
+            if (*(const int *)(rec_data + cond.lhs_offset) <= *(const int *)(rec_data + cond.rhs_offset)) return false;
+        }
+        for (const auto &cond : conds[OP_LE]) {
+            if (*(const int *)(rec_data + cond.lhs_offset) > *(const int *)(rec_data + cond.rhs_offset)) return false;
+        }
+        for (const auto &cond : conds[OP_GE]) {
+            if (*(const int *)(rec_data + cond.lhs_offset) < *(const int *)(rec_data + cond.rhs_offset)) return false;
+        }
+        return true;
+    }
+
+    static bool eval_float_vals(const char *rec_data, const std::array<std::vector<FloatValCond>, 6> &conds) {
+        for (const auto &cond : conds[OP_EQ]) {
+            if (*(const float *)(rec_data + cond.offset) != cond.value) return false;
+        }
+        for (const auto &cond : conds[OP_NE]) {
+            if (*(const float *)(rec_data + cond.offset) == cond.value) return false;
+        }
+        for (const auto &cond : conds[OP_LT]) {
+            if (*(const float *)(rec_data + cond.offset) >= cond.value) return false;
+        }
+        for (const auto &cond : conds[OP_GT]) {
+            if (*(const float *)(rec_data + cond.offset) <= cond.value) return false;
+        }
+        for (const auto &cond : conds[OP_LE]) {
+            if (*(const float *)(rec_data + cond.offset) > cond.value) return false;
+        }
+        for (const auto &cond : conds[OP_GE]) {
+            if (*(const float *)(rec_data + cond.offset) < cond.value) return false;
+        }
+        return true;
+    }
+
+    static bool eval_float_cols(const char *rec_data, const std::array<std::vector<FloatColCond>, 6> &conds) {
+        for (const auto &cond : conds[OP_EQ]) {
+            if (*(const float *)(rec_data + cond.lhs_offset) != *(const float *)(rec_data + cond.rhs_offset)) return false;
+        }
+        for (const auto &cond : conds[OP_NE]) {
+            if (*(const float *)(rec_data + cond.lhs_offset) == *(const float *)(rec_data + cond.rhs_offset)) return false;
+        }
+        for (const auto &cond : conds[OP_LT]) {
+            if (*(const float *)(rec_data + cond.lhs_offset) >= *(const float *)(rec_data + cond.rhs_offset)) return false;
+        }
+        for (const auto &cond : conds[OP_GT]) {
+            if (*(const float *)(rec_data + cond.lhs_offset) <= *(const float *)(rec_data + cond.rhs_offset)) return false;
+        }
+        for (const auto &cond : conds[OP_LE]) {
+            if (*(const float *)(rec_data + cond.lhs_offset) > *(const float *)(rec_data + cond.rhs_offset)) return false;
+        }
+        for (const auto &cond : conds[OP_GE]) {
+            if (*(const float *)(rec_data + cond.lhs_offset) < *(const float *)(rec_data + cond.rhs_offset)) return false;
+        }
+        return true;
+    }
+
+    static bool eval_string_vals(const char *rec_data, const std::array<std::vector<StringValCond>, 6> &conds) {
+        for (const auto &cond : conds[OP_EQ]) {
+            if (!fixed_string_equal(rec_data + cond.offset, cond.len, cond.value)) {
+                return false;
+            }
+        }
+        for (const auto &cond : conds[OP_NE]) {
+            if (fixed_string_equal(rec_data + cond.offset, cond.len, cond.value)) {
+                return false;
+            }
+        }
+        for (size_t idx = OP_LT; idx < conds.size(); ++idx) {
+            CompOp op = static_cast<CompOp>(idx);
+            for (const auto &cond : conds[idx]) {
+                if (!compare_string(fixed_string_view(rec_data + cond.offset, cond.len), op,
+                                    std::string_view(cond.value))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    static bool eval_string_cols(const char *rec_data, const std::array<std::vector<StringColCond>, 6> &conds) {
+        for (size_t idx = 0; idx < conds.size(); ++idx) {
+            CompOp op = static_cast<CompOp>(idx);
+            for (const auto &cond : conds[idx]) {
+                if (!compare_string(fixed_string_view(rec_data + cond.lhs_offset, cond.lhs_len), op,
+                                    fixed_string_view(rec_data + cond.rhs_offset, cond.rhs_len))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     static const ColMeta *find_col(const std::vector<ColMeta> &cols, const TabCol &target) {
         for (auto &col : cols) {
             if (col.tab_name == target.tab_name && col.name == target.col_name) {
@@ -203,60 +374,56 @@ class ConditionEvaluator {
     }
 
     void bind(const std::vector<ColMeta> &cols, const std::vector<Condition> &conds) {
-        conds_.clear();
-        conds_.reserve(conds.size());
+        invalid_ = false;
+        cond_count_ = 0;
+        for (auto &bucket : int_vals_) bucket.clear();
+        for (auto &bucket : int_cols_) bucket.clear();
+        for (auto &bucket : float_vals_) bucket.clear();
+        for (auto &bucket : float_cols_) bucket.clear();
+        for (auto &bucket : string_vals_) bucket.clear();
+        for (auto &bucket : string_cols_) bucket.clear();
         for (auto &cond : conds) {
-            BoundCond bound;
-            bound.lhs = find_col(cols, cond.lhs_col);
-            if (bound.lhs == nullptr) {
-                conds_.push_back(bound);
+            const ColMeta *lhs = find_col(cols, cond.lhs_col);
+            if (lhs == nullptr) {
+                invalid_ = true;
                 continue;
             }
-            bound.op = cond.op;
-            bound.is_rhs_val = cond.is_rhs_val;
+            cond_count_++;
+            size_t idx = op_index(cond.op);
             if (cond.is_rhs_val) {
-                bound.rhs_val = &cond.rhs_val;
+                if (lhs->type == TYPE_INT) {
+                    int_vals_[idx].push_back({lhs->offset, cond.rhs_val.int_val});
+                } else if (lhs->type == TYPE_FLOAT) {
+                    float_vals_[idx].push_back({lhs->offset, cond.rhs_val.float_val});
+                } else {
+                    string_vals_[idx].push_back({lhs->offset, lhs->len, cond.rhs_val.str_val});
+                }
             } else {
-                bound.rhs_col = find_col(cols, cond.rhs_col);
+                const ColMeta *rhs = find_col(cols, cond.rhs_col);
+                if (rhs == nullptr) {
+                    invalid_ = true;
+                    continue;
+                }
+                if (lhs->type == TYPE_INT) {
+                    int_cols_[idx].push_back({lhs->offset, rhs->offset});
+                } else if (lhs->type == TYPE_FLOAT) {
+                    float_cols_[idx].push_back({lhs->offset, rhs->offset});
+                } else {
+                    string_cols_[idx].push_back({lhs->offset, lhs->len, rhs->offset, rhs->len});
+                }
             }
-            conds_.push_back(bound);
         }
     }
 
-    bool empty() const { return conds_.empty(); }
+    bool empty() const { return cond_count_ == 0 && !invalid_; }
 
     bool eval(const char *rec_data) const {
-        for (auto &cond : conds_) {
-            if (cond.lhs == nullptr || (!cond.is_rhs_val && cond.rhs_col == nullptr)) {
-                return false;
-            }
-            const char *lhs_data = rec_data + cond.lhs->offset;
-            if (cond.is_rhs_val) {
-                if (cond.lhs->type == TYPE_INT) {
-                    if (!compare_int(*(const int *)lhs_data, cond.op, cond.rhs_val->int_val)) return false;
-                } else if (cond.lhs->type == TYPE_FLOAT) {
-                    if (!compare_float(*(const float *)lhs_data, cond.op, cond.rhs_val->float_val)) return false;
-                } else {
-                    if (!compare_string(fixed_string_view(lhs_data, cond.lhs->len), cond.op,
-                                        std::string_view(cond.rhs_val->str_val))) {
-                        return false;
-                    }
-                }
-                continue;
-            }
-
-            const char *rhs_data = rec_data + cond.rhs_col->offset;
-            if (cond.lhs->type == TYPE_INT) {
-                if (!compare_int(*(const int *)lhs_data, cond.op, *(const int *)rhs_data)) return false;
-            } else if (cond.lhs->type == TYPE_FLOAT) {
-                if (!compare_float(*(const float *)lhs_data, cond.op, *(const float *)rhs_data)) return false;
-            } else {
-                if (!compare_string(fixed_string_view(lhs_data, cond.lhs->len), cond.op,
-                                    fixed_string_view(rhs_data, cond.rhs_col->len))) {
-                    return false;
-                }
-            }
-        }
-        return true;
+        return !invalid_ &&
+               eval_int_vals(rec_data, int_vals_) &&
+               eval_int_cols(rec_data, int_cols_) &&
+               eval_float_vals(rec_data, float_vals_) &&
+               eval_float_cols(rec_data, float_cols_) &&
+               eval_string_vals(rec_data, string_vals_) &&
+               eval_string_cols(rec_data, string_cols_);
     }
 };

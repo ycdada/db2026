@@ -214,43 +214,50 @@ SqlTemplate build_sql_template(std::string_view sql) {
 }
 
 bool plan_needs_transaction(const std::shared_ptr<Plan> &plan) {
-    if (auto other = std::dynamic_pointer_cast<OtherPlan>(plan)) {
-        return other->tag != T_Transaction_begin &&
-               other->tag != T_Transaction_commit &&
-               other->tag != T_Transaction_abort &&
-               other->tag != T_Transaction_rollback &&
-               other->tag != T_StaticCheckpoint;
+    switch (plan->tag) {
+        case T_Transaction_begin:
+        case T_Transaction_commit:
+        case T_Transaction_abort:
+        case T_Transaction_rollback:
+        case T_StaticCheckpoint:
+        case T_SetKnob:
+        case T_SetIsolation:
+            return false;
+        default:
+            return true;
     }
-    if (std::dynamic_pointer_cast<SetKnobPlan>(plan) != nullptr ||
-        std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
-        return false;
-    }
-    return true;
 }
 
 bool plan_invalidates_cache(const std::shared_ptr<Plan> &plan) {
-    if (std::dynamic_pointer_cast<DDLPlan>(plan) != nullptr ||
-        std::dynamic_pointer_cast<LoadPlan>(plan) != nullptr ||
-        std::dynamic_pointer_cast<SetKnobPlan>(plan) != nullptr) {
-        return true;
+    switch (plan->tag) {
+        case T_CreateTable:
+        case T_DropTable:
+        case T_CreateIndex:
+        case T_DropIndex:
+        case T_Load:
+        case T_SetKnob:
+        case T_StaticCheckpoint:
+            return true;
+        default:
+            return false;
     }
-    if (auto other = std::dynamic_pointer_cast<OtherPlan>(plan)) {
-        return other->tag == T_StaticCheckpoint;
-    }
-    return false;
 }
 
 bool is_plan_cacheable(const std::shared_ptr<Plan> &plan) {
-    if (std::dynamic_pointer_cast<DMLPlan>(plan) != nullptr) {
-        return true;
+    switch (plan->tag) {
+        case T_Insert:
+        case T_Update:
+        case T_Delete:
+        case T_select:
+        case T_explain:
+        case T_Transaction_begin:
+        case T_Transaction_commit:
+        case T_Transaction_abort:
+        case T_Transaction_rollback:
+            return true;
+        default:
+            return false;
     }
-    if (auto other = std::dynamic_pointer_cast<OtherPlan>(plan)) {
-        return other->tag == T_Transaction_begin ||
-               other->tag == T_Transaction_commit ||
-               other->tag == T_Transaction_abort ||
-               other->tag == T_Transaction_rollback;
-    }
-    return false;
 }
 
 uint64_t current_plan_cache_version() {
@@ -974,7 +981,7 @@ void *client_handler(void *sock_fd) {
             std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, &context);
             portal->run(portalStmt, ql_manager.get(), &txn_id, &context);
             portal->drop();
-            if (std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
+            if (plan->tag == T_SetIsolation) {
                 isolation_output_format.store(true);
             }
             if (plan_invalidates_cache(plan)) {

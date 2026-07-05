@@ -43,6 +43,13 @@ class IndexScanExecutor : public AbstractExecutor {
     bool point_has_rid_ = false;
     bool point_consumed_ = true;
     Rid point_rid_;
+    struct KeyEqFilter {
+        int offset = 0;
+        int len = 0;
+        std::vector<char> value;
+    };
+    std::vector<KeyEqFilter> key_eq_filters_;
+    std::vector<char> current_key_;
 
     Rid rid_;
     std::unique_ptr<RecScan> scan_;
@@ -66,6 +73,7 @@ class IndexScanExecutor : public AbstractExecutor {
     bool use_update_read_locks_ = false;
     bool is_mvcc_txn_ = false;
     bool update_locks_require_full_eq_ = true;
+    TransactionManager::MvccTableMarkerSnapshot mvcc_marker_snapshot_;
 
     bool use_2pl_locks() const {
         return use_2pl_locks_;
@@ -139,7 +147,8 @@ class IndexScanExecutor : public AbstractExecutor {
             bool needs_mvcc_visibility = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                                          context_->txn_mgr_->HasMvccState() &&
                                          (is_mvcc_txn_ ||
-                                          context_->txn_mgr_->HasMvccEntry(tab_name_, rid));
+                                          context_->txn_mgr_->HasMvccEntry(tab_name_, rid,
+                                                                           mvcc_marker_snapshot_));
             if (needs_mvcc_visibility) {
                 rec = context_->txn_mgr_->GetVisibleRecord(
                     tab_name_, rid, context_->txn_,
@@ -174,7 +183,17 @@ class IndexScanExecutor : public AbstractExecutor {
     }
 
     bool load_visible_index_current() {
-        return load_visible_rid(scan_->rid());
+        auto ix_scan = static_cast<IxScan *>(scan_.get());
+        Rid rid;
+        if (key_eq_filters_.empty()) {
+            ix_scan->key_rid_and_next(nullptr, &rid);
+            return load_visible_rid(rid);
+        }
+        ix_scan->key_rid_and_next(current_key_.data(), &rid);
+        if (!index_key_matches_current(current_key_.data())) {
+            return false;
+        }
+        return load_visible_rid(rid);
     }
 
     bool load_next_point() {
@@ -216,6 +235,38 @@ class IndexScanExecutor : public AbstractExecutor {
             offset += col.len;
         }
         return offset > 0;
+    }
+
+    void rebuild_key_eq_filters() {
+        key_eq_filters_.clear();
+        int offset = 0;
+        for (auto &col : index_meta_.cols) {
+            for (auto &cond : fed_conds_) {
+                if (cond.is_rhs_val && cond.op == OP_EQ &&
+                    cond.lhs_col.tab_name == tab_name_ && cond.lhs_col.col_name == col.name) {
+                    KeyEqFilter filter;
+                    filter.offset = offset;
+                    filter.len = col.len;
+                    filter.value.resize(col.len);
+                    copy_value_to_key(filter.value.data(), 0, col, cond.rhs_val);
+                    key_eq_filters_.push_back(std::move(filter));
+                    break;
+                }
+            }
+            offset += col.len;
+        }
+    }
+
+    bool index_key_matches_current(const char *key) {
+        if (key_eq_filters_.empty() || scan_ == nullptr || scan_->is_end()) {
+            return true;
+        }
+        for (auto &filter : key_eq_filters_) {
+            if (memcmp(key + filter.offset, filter.value.data(), filter.len) != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     bool has_full_eq_lookup() const {
@@ -263,8 +314,8 @@ class IndexScanExecutor : public AbstractExecutor {
             } catch (const IndexEntryNotFoundError &) {
                 // A concurrent writer may remove the index slot after this scan positioned its cursor.
                 // Treat the vanished entry like a non-visible tuple and continue from the next slot.
+                scan_->next();
             }
-            scan_->next();
         }
         if (!extra_loaded_) {
             load_mvcc_extra_records();
@@ -326,6 +377,7 @@ class IndexScanExecutor : public AbstractExecutor {
         ih_ = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols)).get();
         lower_key_.resize(index_meta_.col_tot_len);
         upper_key_.resize(index_meta_.col_tot_len);
+        current_key_.resize(index_meta_.col_tot_len);
         fh_ = sm_manager_->fhs_.at(tab_name_).get();
         tab_fd_ = fh_->GetFd();
         cols_ = tab_->cols;
@@ -336,6 +388,10 @@ class IndexScanExecutor : public AbstractExecutor {
         update_locks_require_full_eq_ = update_locks_require_full_eq;
         is_mvcc_txn_ = context_ != nullptr && context_->txn_mgr_ != nullptr &&
                        context_->txn_mgr_->IsMvccTxn(context_->txn_);
+        if (!is_mvcc_txn_ && context_ != nullptr && context_->txn_mgr_ != nullptr &&
+            context_->txn_mgr_->HasMvccState()) {
+            mvcc_marker_snapshot_ = context_->txn_mgr_->GetMvccTableMarkerSnapshot(tab_name_);
+        }
         use_2pl_locks_ = acquire_read_locks &&
                          context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr &&
                          (context_->txn_mgr_ == nullptr || !is_mvcc_txn_);
@@ -387,6 +443,7 @@ class IndexScanExecutor : public AbstractExecutor {
             cond.rhs_val = join_key_val_;
             fed_conds_.push_back(cond);
         }
+        rebuild_key_eq_filters();
         cond_eval_.bind(cols_, fed_conds_);
         returned_rids_.clear();
         ser_read_registered_ = false;
@@ -489,8 +546,7 @@ class IndexScanExecutor : public AbstractExecutor {
             advance_to_next_match();
             return;
         }
-        if (scan_ != nullptr && !scan_->is_end()) {
-            scan_->next();
+        if (scan_ != nullptr) {
             advance_to_next_match();
             return;
         }

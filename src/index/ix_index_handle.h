@@ -234,6 +234,5 @@ class IxIndexHandle {
 
     void maintain_child(IxNodeHandle *node, int child_idx);
 
-    // for index test
     Rid get_rid(const Iid &iid) const;
 };

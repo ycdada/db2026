@@ -36,3 +36,32 @@ void IxScan::next() {
 Rid IxScan::rid() const {
     return ih_->get_rid(iid_);
 }
+
+void IxScan::key_rid_and_next(char *key, Rid *rid) {
+    assert(!is_end());
+    IxNodeHandle *node = ih_->fetch_node(iid_.page_no);
+    assert(node->is_leaf_page());
+    if (iid_.slot_no >= node->get_size()) {
+        bpm_->unpin_page(node->get_page_id(), false);
+        throw IndexEntryNotFoundError();
+    }
+    if (key != nullptr) {
+        memcpy(key, node->get_key(iid_.slot_no), ih_->file_hdr_->col_tot_len_);
+    }
+    if (rid != nullptr) {
+        *rid = *node->get_rid(iid_.slot_no);
+    }
+    if (iid_.slot_no < node->get_size()) {
+        iid_.slot_no++;
+    }
+    if (iid_.slot_no >= node->get_size()) {
+        if (iid_.page_no == ih_->file_hdr_->last_leaf_) {
+            iid_ = end_;
+            bpm_->unpin_page(node->get_page_id(), false);
+            return;
+        }
+        iid_.slot_no = 0;
+        iid_.page_no = node->get_next_leaf();
+    }
+    bpm_->unpin_page(node->get_page_id(), false);
+}

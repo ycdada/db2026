@@ -266,6 +266,17 @@ bool TransactionManager::HasMvccState() const {
            mvcc_entry_count_.load(std::memory_order_acquire) > 0;
 }
 
+TransactionManager::MvccTableMarkerSnapshot TransactionManager::GetMvccTableMarkerSnapshot(
+    const std::string &tab_name) {
+    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    auto marker = GetOrCreateMvccTableMarkerLocked(tab_name);
+    MvccTableMarkerSnapshot snapshot;
+    snapshot.rids = marker->rids;
+    snapshot.generation_counter = marker->generation;
+    snapshot.generation = marker->generation->load(std::memory_order_acquire);
+    return snapshot;
+}
+
 bool TransactionManager::HasMvccEntry(const std::string &tab_name, const Rid &rid) {
     if (!HasMvccState()) {
         return false;
@@ -274,8 +285,92 @@ bool TransactionManager::HasMvccEntry(const std::string &tab_name, const Rid &ri
     return mvcc_versions_.find(MvccKey(tab_name, rid)) != mvcc_versions_.end();
 }
 
+bool TransactionManager::HasMvccEntry(const std::string &tab_name, const Rid &rid,
+                                      MvccTableMarkerSnapshot &snapshot) {
+    if (!HasMvccState()) {
+        return false;
+    }
+    uint64_t packed_rid = PackMvccRid(rid);
+    if (snapshot.rids != nullptr && snapshot.rids->find(packed_rid) != snapshot.rids->end()) {
+        return true;
+    }
+    if (snapshot.generation_counter != nullptr &&
+        snapshot.generation_counter->load(std::memory_order_acquire) == snapshot.generation) {
+        return false;
+    }
+    if (snapshot.generation_counter != nullptr) {
+        std::scoped_lock<std::mutex> lock(mvcc_latch_);
+        auto marker_it = mvcc_table_markers_.find(tab_name);
+        if (marker_it == mvcc_table_markers_.end() || marker_it->second == nullptr) {
+            snapshot.rids = nullptr;
+            snapshot.generation_counter = nullptr;
+            snapshot.generation = 0;
+            return false;
+        }
+        auto marker = marker_it->second;
+        snapshot.rids = marker->rids;
+        snapshot.generation_counter = marker->generation;
+        snapshot.generation = marker->generation->load(std::memory_order_acquire);
+        return snapshot.rids != nullptr && snapshot.rids->find(packed_rid) != snapshot.rids->end();
+    }
+    return HasMvccEntry(tab_name, rid);
+}
+
 std::string TransactionManager::MvccKey(const std::string &tab_name, const Rid &rid) const {
     return tab_name + "#" + std::to_string(rid.page_no) + "#" + std::to_string(rid.slot_no);
+}
+
+uint64_t TransactionManager::PackMvccRid(const Rid &rid) const {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(rid.page_no)) << 32) |
+           static_cast<uint32_t>(rid.slot_no);
+}
+
+std::shared_ptr<TransactionManager::MvccTableMarker>
+TransactionManager::GetOrCreateMvccTableMarkerLocked(const std::string &tab_name) {
+    auto &marker = mvcc_table_markers_[tab_name];
+    if (marker == nullptr) {
+        marker = std::make_shared<MvccTableMarker>();
+    }
+    return marker;
+}
+
+void TransactionManager::AddMvccMarkerLocked(const std::string &tab_name, const Rid &rid) {
+    auto marker = GetOrCreateMvccTableMarkerLocked(tab_name);
+    uint64_t packed_rid = PackMvccRid(rid);
+    if (marker->rids.use_count() == 1) {
+        auto mutable_rids = std::const_pointer_cast<std::unordered_set<uint64_t>>(marker->rids);
+        if (mutable_rids->insert(packed_rid).second) {
+            marker->generation->fetch_add(1, std::memory_order_release);
+        }
+        return;
+    }
+    auto next = std::make_shared<std::unordered_set<uint64_t>>(*marker->rids);
+    if (next->insert(packed_rid).second) {
+        marker->rids = next;
+        marker->generation->fetch_add(1, std::memory_order_release);
+    }
+}
+
+void TransactionManager::RemoveMvccMarkerLocked(const std::string &tab_name, const Rid &rid) {
+    auto marker_it = mvcc_table_markers_.find(tab_name);
+    if (marker_it == mvcc_table_markers_.end() || marker_it->second == nullptr) {
+        return;
+    }
+    auto marker = marker_it->second;
+    uint64_t packed_rid = PackMvccRid(rid);
+    if (marker->rids->find(packed_rid) == marker->rids->end()) {
+        return;
+    }
+    if (marker->rids.use_count() == 1) {
+        auto mutable_rids = std::const_pointer_cast<std::unordered_set<uint64_t>>(marker->rids);
+        mutable_rids->erase(packed_rid);
+        marker->generation->fetch_add(1, std::memory_order_release);
+        return;
+    }
+    auto next = std::make_shared<std::unordered_set<uint64_t>>(*marker->rids);
+    next->erase(packed_rid);
+    marker->rids = next;
+    marker->generation->fetch_add(1, std::memory_order_release);
 }
 
 TransactionManager::MvccEntry &TransactionManager::EnsureMvccEntryLocked(
@@ -286,6 +381,7 @@ TransactionManager::MvccEntry &TransactionManager::EnsureMvccEntryLocked(
     if (inserted) {
         mvcc_entry_count_.fetch_add(1, std::memory_order_release);
         mvcc_table_keys_[tab_name].insert(key);
+        AddMvccMarkerLocked(tab_name, rid);
     }
     if (inserted && physical != nullptr) {
         entry.exists = true;
@@ -544,6 +640,7 @@ void TransactionManager::GarbageCollection() {
                 }
             }
         }
+        RemoveMvccMarkerLocked(it->second.tab_name, it->second.rid);
         auto table_it = mvcc_table_keys_.find(it->second.tab_name);
         if (table_it != mvcc_table_keys_.end()) {
             table_it->second.erase(key);
@@ -1153,6 +1250,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             if (entry.had_entry_on_abort && entry.restore_snapshot != nullptr) {
                 mvcc_versions_[key] = *entry.restore_snapshot;
             } else {
+                RemoveMvccMarkerLocked(tab_name, rid);
                 auto table_it = mvcc_table_keys_.find(tab_name);
                 if (table_it != mvcc_table_keys_.end()) {
                     table_it->second.erase(key);

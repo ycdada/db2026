@@ -34,5 +34,7 @@ class IxScan : public RecScan {
 
     Rid rid() const override;
 
+    void key_rid_and_next(char *key, Rid *rid);
+
     const Iid &iid() const { return iid_; }
 };

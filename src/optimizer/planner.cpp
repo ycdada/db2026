@@ -52,8 +52,23 @@ bool Planner::get_index_cols(const std::string &tab_name, const std::vector<Cond
         }
     }
     size_t best_match = 0;
+    size_t best_suffix_eq = 0;
     std::vector<std::string> best_cols;
+    std::vector<std::string> best_suffix_cols;
     for (auto &index : tab.indexes) {
+        size_t eq_matched = 0;
+        for (auto &col : index.cols) {
+            auto cond_it = cond_by_col.find(col.name);
+            if (cond_it != cond_by_col.end()) {
+                for (auto *cond : cond_it->second) {
+                    if (cond->op == OP_EQ) {
+                        eq_matched++;
+                        break;
+                    }
+                }
+            }
+        }
+
         size_t matched = 0;
         for (auto &col : index.cols) {
             auto cond_it = cond_by_col.find(col.name);
@@ -83,9 +98,20 @@ bool Planner::get_index_cols(const std::string &tab_name, const std::vector<Cond
                 best_cols.push_back(col.name);
             }
         }
+        if (matched == 0 && eq_matched > best_suffix_eq && eq_matched >= 2) {
+            best_suffix_eq = eq_matched;
+            best_suffix_cols.clear();
+            for (auto &col : index.cols) {
+                best_suffix_cols.push_back(col.name);
+            }
+        }
     }
     if (best_match > 0) {
         index_col_names = best_cols;
+        return true;
+    }
+    if (best_suffix_eq >= 2) {
+        index_col_names = best_suffix_cols;
         return true;
     }
     return false;

@@ -142,7 +142,15 @@ public:
     // 使后续 abort 无法恢复被删记录。
     bool ShouldDeferDelete(Transaction *txn) const;
     bool HasMvccState() const;
+    struct MvccTableMarkerSnapshot {
+        std::shared_ptr<const std::unordered_set<uint64_t>> rids;
+        std::shared_ptr<const std::atomic<uint64_t>> generation_counter;
+        uint64_t generation = 0;
+    };
+    MvccTableMarkerSnapshot GetMvccTableMarkerSnapshot(const std::string &tab_name);
     bool HasMvccEntry(const std::string &tab_name, const Rid &rid);
+    bool HasMvccEntry(const std::string &tab_name, const Rid &rid,
+                      MvccTableMarkerSnapshot &snapshot);
     std::string MvccKey(const std::string &tab_name, const Rid &rid) const;
     std::unique_ptr<RmRecord> GetVisibleRecord(const std::string &tab_name, const Rid &rid,
                                                const RmRecord &physical, Transaction *txn);
@@ -265,6 +273,12 @@ private:
 	    std::unordered_map<std::string, MvccEntry> mvcc_versions_;
 	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_table_keys_;
 	    std::unordered_map<std::string, std::unordered_set<std::string>> mvcc_index_compensation_keys_;
+    struct MvccTableMarker {
+        std::shared_ptr<std::atomic<uint64_t>> generation = std::make_shared<std::atomic<uint64_t>>(0);
+        std::shared_ptr<const std::unordered_set<uint64_t>> rids =
+            std::make_shared<std::unordered_set<uint64_t>>();
+    };
+    std::unordered_map<std::string, std::shared_ptr<MvccTableMarker>> mvcc_table_markers_;
 	    std::unordered_map<txn_id_t, std::vector<PredicateRead>> serializable_reads_;
 	    std::set<std::pair<txn_id_t, txn_id_t>> rw_edges_;
 	    std::unordered_map<txn_id_t, std::set<txn_id_t>> rw_in_;
@@ -274,6 +288,10 @@ private:
 
 	    MvccEntry &EnsureMvccEntryLocked(const std::string &tab_name, const Rid &rid,
 	                                     const RmRecord *physical = nullptr);
+    uint64_t PackMvccRid(const Rid &rid) const;
+    std::shared_ptr<MvccTableMarker> GetOrCreateMvccTableMarkerLocked(const std::string &tab_name);
+    void AddMvccMarkerLocked(const std::string &tab_name, const Rid &rid);
+    void RemoveMvccMarkerLocked(const std::string &tab_name, const Rid &rid);
 	    std::optional<RmRecord> VisibleRecordLocked(const std::string &key, const MvccEntry &entry,
 	                                                const RmRecord &physical, Transaction *txn) const;
 	    std::vector<std::string> BuildMvccConflictKeys(const TabMeta &tab, const RmRecord &record,
