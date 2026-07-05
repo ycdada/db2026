@@ -252,6 +252,11 @@ bool TransactionManager::ShouldVersionWrites(Transaction *txn) const {
     return txn->is_mvcc() || active_mvcc_txn_count_.load() > 0;
 }
 
+bool TransactionManager::ShouldDeferDelete(Transaction *txn) const {
+    if (txn == nullptr) return false;
+    return ShouldVersionWrites(txn) || txn->get_txn_mode();
+}
+
 bool TransactionManager::HasActiveMvccTransactions() const {
     return active_mvcc_txn_count_.load() > 0;
 }
@@ -259,6 +264,14 @@ bool TransactionManager::HasActiveMvccTransactions() const {
 bool TransactionManager::HasMvccState() const {
     return active_mvcc_txn_count_.load(std::memory_order_acquire) > 0 ||
            mvcc_entry_count_.load(std::memory_order_acquire) > 0;
+}
+
+bool TransactionManager::HasMvccEntry(const std::string &tab_name, const Rid &rid) {
+    if (!HasMvccState()) {
+        return false;
+    }
+    std::scoped_lock<std::mutex> lock(mvcc_latch_);
+    return mvcc_versions_.find(MvccKey(tab_name, rid)) != mvcc_versions_.end();
 }
 
 std::string TransactionManager::MvccKey(const std::string &tab_name, const Rid &rid) const {
@@ -838,7 +851,7 @@ void TransactionManager::MvccUpdate(const std::string &tab_name, const Rid &rid,
 
 void TransactionManager::MvccDelete(const std::string &tab_name, const Rid &rid,
                                     const RmRecord &old_rec, Transaction *txn) {
-    if (!ShouldVersionWrites(txn)) return;
+    if (!ShouldDeferDelete(txn)) return;
     std::scoped_lock<std::mutex> lock(mvcc_latch_);
     CheckSerializableWriteLocked(tab_name, rid, &old_rec, nullptr, txn);
     PrepareWriteLocked(tab_name, rid, old_rec, txn, false);

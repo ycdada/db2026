@@ -138,7 +138,11 @@ public:
     // 当写者本身是 SI/SER，或当前存在活跃的 SI/SER 事务时，写操作必须保留旧版本，
     // 否则原地覆盖会破坏活跃快照（见题目9 示例二：T2 未 SET 仍不能毁掉 T1 的 SI 快照）。
     bool ShouldVersionWrites(Transaction *txn) const;
+    // 显式事务内 DELETE 在提交前不能释放物理槽位，否则并发 INSERT 可能复用 RID，
+    // 使后续 abort 无法恢复被删记录。
+    bool ShouldDeferDelete(Transaction *txn) const;
     bool HasMvccState() const;
+    bool HasMvccEntry(const std::string &tab_name, const Rid &rid);
     std::string MvccKey(const std::string &tab_name, const Rid &rid) const;
     std::unique_ptr<RmRecord> GetVisibleRecord(const std::string &tab_name, const Rid &rid,
                                                const RmRecord &physical, Transaction *txn);

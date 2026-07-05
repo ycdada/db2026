@@ -136,8 +136,11 @@ class IndexScanExecutor : public AbstractExecutor {
         std::shared_ptr<const RmRecord> rec_handle;
         const char *rec_data = nullptr;
         try {
-            if (context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                context_->txn_mgr_->HasMvccState()) {
+            bool needs_mvcc_visibility = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                                         context_->txn_mgr_->HasMvccState() &&
+                                         (is_mvcc_txn_ ||
+                                          context_->txn_mgr_->HasMvccEntry(tab_name_, rid));
+            if (needs_mvcc_visibility) {
                 rec = context_->txn_mgr_->GetVisibleRecord(
                     tab_name_, rid, context_->txn_,
                     [&]() { return fh_->get_record(rid, context_); });

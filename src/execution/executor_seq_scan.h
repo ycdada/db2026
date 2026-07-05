@@ -86,8 +86,13 @@ class SeqScanExecutor : public AbstractExecutor {
         std::shared_ptr<const RmRecord> visible_handle;
         const char *visible_data = nullptr;
         try {
-            if (context_ != nullptr && context_->txn_mgr_ != nullptr &&
-                context_->txn_mgr_->HasMvccState()) {
+            bool is_mvcc_txn = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                               context_->txn_mgr_->IsMvccTxn(context_->txn_);
+            bool needs_mvcc_visibility = context_ != nullptr && context_->txn_mgr_ != nullptr &&
+                                         context_->txn_mgr_->HasMvccState() &&
+                                         (is_mvcc_txn ||
+                                          context_->txn_mgr_->HasMvccEntry(tab_name_, current_rid));
+            if (needs_mvcc_visibility) {
                 visible = context_->txn_mgr_->GetVisibleRecord(
                     tab_name_, current_rid, context_->txn_,
                     [&]() { return fh_->get_record(current_rid, context_); });
