@@ -1078,8 +1078,6 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
         }
         bool has_writes = !records.empty() || !txn->mvcc_write_keys().empty();
 
-        std::unordered_set<std::string> processed_keys;
-        processed_keys.reserve(records.size());
         auto rollback_physical_write = [&](WriteRecord *write_record, const std::string &tab_name, TabMeta &tab,
                                            RmFileHandle *fh, const Rid &rid) {
             switch (write_record->GetWriteType()) {
@@ -1123,13 +1121,6 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             RmFileHandle *fh = sm_manager_->fhs_.at(tab_name).get();
             Rid rid = write_record->GetRid();
             std::string key = MvccKey(tab_name, rid);
-            if (!processed_keys.insert(key).second) {
-                if (write_record->GetWriteType() == WType::INSERT_TUPLE) {
-                    UnregisterPhysicalInsert(tab_name, rid, txn);
-                }
-                delete write_record;
-                continue;
-            }
 
             std::scoped_lock<std::mutex> lock(mvcc_latch_);
             auto it = mvcc_versions_.find(key);
