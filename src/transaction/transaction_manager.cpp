@@ -1080,6 +1080,43 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
 
         std::unordered_set<std::string> processed_keys;
         processed_keys.reserve(records.size());
+        auto rollback_physical_write = [&](WriteRecord *write_record, const std::string &tab_name, TabMeta &tab,
+                                           RmFileHandle *fh, const Rid &rid) {
+            switch (write_record->GetWriteType()) {
+                case WType::INSERT_TUPLE: {
+                    if (OwnsPhysicalInsert(tab_name, rid, txn) && fh->is_record(rid)) {
+                        auto rec = fh->get_record(rid, nullptr);
+                        delete_index_entries(sm_manager_, tab_name, tab, *rec, txn);
+                        fh->delete_record(rid, nullptr);
+                        lock_manager_->unlock(txn, LockDataId(fh->GetFd(), rid, LockDataType::RECORD));
+                    }
+                    UnregisterPhysicalInsert(tab_name, rid, txn);
+                    break;
+                }
+                case WType::DELETE_TUPLE: {
+                    RmRecord &old_rec = write_record->GetRecord();
+                    if (fh->is_record(rid)) {
+                        auto curr_rec = fh->get_record(rid, nullptr);
+                        delete_index_entries(sm_manager_, tab_name, tab, *curr_rec, txn);
+                        fh->update_record(rid, old_rec.data, nullptr);
+                    } else {
+                        fh->insert_record(rid, old_rec.data);
+                    }
+                    insert_index_entries(sm_manager_, tab_name, tab, old_rec, rid, txn);
+                    break;
+                }
+                case WType::UPDATE_TUPLE: {
+                    if (fh->is_record(rid)) {
+                        auto curr_rec = fh->get_record(rid, nullptr);
+                        delete_index_entries(sm_manager_, tab_name, tab, *curr_rec, txn);
+                        RmRecord &old_rec = write_record->GetRecord();
+                        fh->update_record(rid, old_rec.data, nullptr);
+                        insert_index_entries(sm_manager_, tab_name, tab, old_rec, rid, txn);
+                    }
+                    break;
+                }
+            }
+        };
         for (auto *write_record : records) {
             const std::string &tab_name = write_record->GetTableName();
             TabMeta &tab = sm_manager_->db_.get_table(tab_name);
@@ -1097,9 +1134,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             std::scoped_lock<std::mutex> lock(mvcc_latch_);
             auto it = mvcc_versions_.find(key);
             if (it == mvcc_versions_.end() || it->second.writer_txn != txn->get_transaction_id()) {
-                if (write_record->GetWriteType() == WType::INSERT_TUPLE) {
-                    UnregisterPhysicalInsert(tab_name, rid, txn);
-                }
+                rollback_physical_write(write_record, tab_name, tab, fh, rid);
                 delete write_record;
                 continue;
             }
