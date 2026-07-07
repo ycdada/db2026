@@ -1,0 +1,1906 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="390" onload="init(evt)" viewBox="0 0 1200 390" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="390.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >RMDB perf flame graph</text>
+<text id="details" x="10.00" y="373" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="373" > </text>
+<g id="frames">
+<g >
+<title>__pthread_mutex_unlock (40,404,040 samples, 0.30%)</title><rect x="530.7" y="181" width="3.5" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="533.67" y="191.5" ></text>
+</g>
+<g >
+<title>cfree (10,101,010 samples, 0.08%)</title><rect x="345.5" y="261" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="348.48" y="271.5" ></text>
+</g>
+<g >
+<title>void std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;char*&gt; (10,101,010 samples, 0.08%)</title><rect x="356.2" y="165" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="359.22" y="175.5" ></text>
+</g>
+<g >
+<title>__dynamic_cast (10,101,010 samples, 0.08%)</title><rect x="220.2" y="309" width="0.9" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="223.24" y="319.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::pin (10,101,010 samples, 0.08%)</title><rect x="1001.2" y="197" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="1004.24" y="207.5" ></text>
+</g>
+<g >
+<title>RmFileHandle::update_record (10,101,010 samples, 0.08%)</title><rect x="457.3" y="229" width="0.9" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="460.31" y="239.5" ></text>
+</g>
+<g >
+<title>cfree (30,303,030 samples, 0.23%)</title><rect x="979.8" y="213" width="2.6" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="982.76" y="223.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="561.1" y="133" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="564.08" y="143.5" ></text>
+</g>
+<g >
+<title>malloc (676,767,670 samples, 5.08%)</title><rect x="221.1" y="309" width="60.0" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="224.13" y="319.5" >malloc</text>
+</g>
+<g >
+<title>IxIndexHandle::find_leaf_page (10,101,010 samples, 0.08%)</title><rect x="473.4" y="197" width="0.9" height="15.0" fill="rgb(238,154,36)" rx="2" ry="2" />
+<text  x="476.41" y="207.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::unpin_page (20,202,020 samples, 0.15%)</title><rect x="481.5" y="213" width="1.8" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="484.46" y="223.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="978.9" y="213" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="981.87" y="223.5" ></text>
+</g>
+<g >
+<title>ScanPlan::ScanPlan (30,303,030 samples, 0.23%)</title><rect x="357.1" y="181" width="2.7" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="360.11" y="191.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_base&lt; (20,202,020 samples, 0.15%)</title><rect x="1155.1" y="261" width="1.8" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1158.11" y="271.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (40,404,040 samples, 0.30%)</title><rect x="213.1" y="261" width="3.6" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="216.08" y="271.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::shared_ptr&lt;ast::HavingExpr&gt;, std::allocator&lt;std::shared_ptr&lt;ast::HavingExpr&gt; &gt; &gt;::operator= (10,101,010 samples, 0.08%)</title><rect x="1131.8" y="245" width="0.9" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="1134.85" y="255.5" ></text>
+</g>
+<g >
+<title>RmFileHandle::fetch_page_handle_unlocked (10,101,010 samples, 0.08%)</title><rect x="455.5" y="213" width="0.9" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="458.52" y="223.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::find_leaf_page (20,202,020 samples, 0.15%)</title><rect x="470.7" y="213" width="1.8" height="15.0" fill="rgb(238,154,36)" rx="2" ry="2" />
+<text  x="473.73" y="223.5" ></text>
+</g>
+<g >
+<title>NestedLoopJoinExecutor::~NestedLoopJoinExecutor (20,202,020 samples, 0.15%)</title><rect x="383.9" y="245" width="1.8" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="386.95" y="255.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (1,212,121,200 samples, 9.10%)</title><rect x="806.2" y="197" width="107.4" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="809.21" y="207.5" >[libc-2.31.so]</text>
+</g>
+<g >
+<title>eval_conds (121,212,120 samples, 0.91%)</title><rect x="928.8" y="197" width="10.7" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="931.77" y="207.5" ></text>
+</g>
+<g >
+<title>next_token (70,707,070 samples, 0.53%)</title><rect x="1030.8" y="277" width="6.2" height="15.0" fill="rgb(241,168,40)" rx="2" ry="2" />
+<text  x="1033.76" y="287.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;::operator= (10,101,010 samples, 0.08%)</title><rect x="1126.5" y="245" width="0.9" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="1129.48" y="255.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (20,202,020 samples, 0.15%)</title><rect x="985.1" y="229" width="1.8" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="988.13" y="239.5" ></text>
+</g>
+<g >
+<title>operator delete (10,101,010 samples, 0.08%)</title><rect x="330.3" y="245" width="0.9" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="333.27" y="255.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_mutate (10,101,010 samples, 0.08%)</title><rect x="995.0" y="261" width="0.9" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="997.97" y="271.5" ></text>
+</g>
+<g >
+<title>std::__shared_count&lt; (101,010,100 samples, 0.76%)</title><rect x="1157.8" y="261" width="8.9" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="1160.79" y="271.5" ></text>
+</g>
+<g >
+<title>Analyze::convert_sv_comp_op (10,101,010 samples, 0.08%)</title><rect x="326.7" y="245" width="0.9" height="15.0" fill="rgb(248,200,47)" rx="2" ry="2" />
+<text  x="329.69" y="255.5" ></text>
+</g>
+<g >
+<title>operator new (20,202,020 samples, 0.15%)</title><rect x="579.0" y="181" width="1.8" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="581.98" y="191.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::insert_entry (10,101,010 samples, 0.08%)</title><rect x="451.0" y="229" width="0.9" height="15.0" fill="rgb(249,202,48)" rx="2" ry="2" />
+<text  x="454.05" y="239.5" ></text>
+</g>
+<g >
+<title>std::_Hash_bytes (10,101,010 samples, 0.08%)</title><rect x="1022.7" y="245" width="0.9" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="1025.71" y="255.5" ></text>
+</g>
+<g >
+<title>Planner::make_one_rel (20,202,020 samples, 0.15%)</title><rect x="350.0" y="229" width="1.7" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="352.95" y="239.5" ></text>
+</g>
+<g >
+<title>operator delete (20,202,020 samples, 0.15%)</title><rect x="982.4" y="213" width="1.8" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="985.45" y="223.5" ></text>
+</g>
+<g >
+<title>malloc (10,101,010 samples, 0.08%)</title><rect x="578.1" y="181" width="0.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="581.08" y="191.5" ></text>
+</g>
+<g >
+<title>all (13,323,232,190 samples, 100%)</title><rect x="10.0" y="341" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;::operator= (10,101,010 samples, 0.08%)</title><rect x="368.7" y="245" width="0.9" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="371.74" y="255.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree_insert_and_rebalance (10,101,010 samples, 0.08%)</title><rect x="341.0" y="245" width="0.9" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="344.01" y="255.5" ></text>
+</g>
+<g >
+<title>Optimizer::plan_query (262,626,260 samples, 1.97%)</title><rect x="348.2" y="277" width="23.2" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="351.17" y="287.5" >O..</text>
+</g>
+<g >
+<title>__dynamic_cast (30,303,030 samples, 0.23%)</title><rect x="1025.4" y="277" width="2.7" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="1028.39" y="287.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;LockDataId, std::pair&lt;LockDataId const, LockManager::LockRequestQueue&gt;, std::allocator&lt;std::pair&lt;LockDataId const, LockManager::LockRequestQueue&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;LockDataId&gt;, std::hash&lt;LockDataId&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt;, true&gt;::operator[] (10,101,010 samples, 0.08%)</title><rect x="462.7" y="197" width="0.9" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="465.68" y="207.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (40,404,040 samples, 0.30%)</title><rect x="203.2" y="277" width="3.6" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="206.24" y="287.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="375.9" y="181" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="378.90" y="191.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::IndexScanExecutor (30,303,030 samples, 0.23%)</title><rect x="1007.5" y="245" width="2.7" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="1010.50" y="255.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_assign (30,303,030 samples, 0.23%)</title><rect x="209.5" y="277" width="2.7" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="212.50" y="287.5" ></text>
+</g>
+<g >
+<title>void std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;char*&gt; (10,101,010 samples, 0.08%)</title><rect x="1018.2" y="213" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="1021.23" y="223.5" ></text>
+</g>
+<g >
+<title>ProjectionExecutor::NextBatch (10,101,010 samples, 0.08%)</title><rect x="372.3" y="261" width="0.9" height="15.0" fill="rgb(245,188,44)" rx="2" ry="2" />
+<text  x="375.32" y="271.5" ></text>
+</g>
+<g >
+<title>RmFileHandle::fetch_page_handle_unlocked (10,101,010 samples, 0.08%)</title><rect x="457.3" y="213" width="0.9" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="460.31" y="223.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::pin (10,101,010 samples, 0.08%)</title><rect x="467.1" y="181" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="470.15" y="191.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::fetch_page (20,202,020 samples, 0.15%)</title><rect x="1000.3" y="213" width="1.8" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="1003.34" y="223.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock (20,202,020 samples, 0.15%)</title><rect x="570.0" y="165" width="1.8" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="573.03" y="175.5" ></text>
+</g>
+<g >
+<title>Condition::Condition (10,101,010 samples, 0.08%)</title><rect x="337.4" y="229" width="0.9" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="340.43" y="239.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::pin (141,414,140 samples, 1.06%)</title><rect x="552.1" y="149" width="12.6" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="555.14" y="159.5" ></text>
+</g>
+<g >
+<title>cfree (10,101,010 samples, 0.08%)</title><rect x="1111.3" y="245" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="1114.27" y="255.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::~IndexScanExecutor (10,101,010 samples, 0.08%)</title><rect x="1005.7" y="245" width="0.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1008.71" y="255.5" ></text>
+</g>
+<g >
+<title>yylex (181,818,180 samples, 1.36%)</title><rect x="1171.2" y="261" width="16.1" height="15.0" fill="rgb(224,91,21)" rx="2" ry="2" />
+<text  x="1174.21" y="271.5" ></text>
+</g>
+<g >
+<title>SeqScanExecutor::beginTuple (20,202,020 samples, 0.15%)</title><rect x="474.3" y="229" width="1.8" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="477.31" y="239.5" ></text>
+</g>
+<g >
+<title>ast::SemValue::~SemValue (151,515,150 samples, 1.14%)</title><rect x="1138.1" y="261" width="13.4" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="1141.11" y="271.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::fetch_page (262,626,260 samples, 1.97%)</title><rect x="544.1" y="165" width="23.2" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="547.09" y="175.5" >B..</text>
+</g>
+<g >
+<title>__pthread_mutex_lock (60,606,060 samples, 0.45%)</title><rect x="525.3" y="181" width="5.4" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="528.30" y="191.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="367.8" y="197" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="370.85" y="207.5" ></text>
+</g>
+<g >
+<title>void std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;char*&gt; (10,101,010 samples, 0.08%)</title><rect x="1019.1" y="229" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="1022.13" y="239.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::fetch_page (10,101,010 samples, 0.08%)</title><rect x="455.5" y="197" width="0.9" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="458.52" y="207.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (40,404,040 samples, 0.30%)</title><rect x="378.6" y="149" width="3.6" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="381.58" y="159.5" ></text>
+</g>
+<g >
+<title>std::_MakeUniq&lt;InsertExecutor&gt;::__single_object std::make_unique&lt;InsertExecutor, SmManager*&amp;, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;&amp;, std::vector&lt;Value, std::allocator&lt;Value&gt; &gt;, Context*&amp;&gt; (10,101,010 samples, 0.08%)</title><rect x="1020.9" y="261" width="0.9" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="1023.92" y="271.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::lower_bound (10,101,010 samples, 0.08%)</title><rect x="473.4" y="213" width="0.9" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="476.41" y="223.5" ></text>
+</g>
+<g >
+<title>free@plt (10,101,010 samples, 0.08%)</title><rect x="433.2" y="213" width="0.8" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="436.15" y="223.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (10,101,010 samples, 0.08%)</title><rect x="381.3" y="37" width="0.9" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="384.27" y="47.5" ></text>
+</g>
+<g >
+<title>cfree (20,202,020 samples, 0.15%)</title><rect x="990.5" y="245" width="1.8" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="993.50" y="255.5" ></text>
+</g>
+<g >
+<title>Analyze::check_column (10,101,010 samples, 0.08%)</title><rect x="339.2" y="245" width="0.9" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="342.22" y="255.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="1020.0" y="261" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="1023.02" y="271.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::pair&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; const, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt;, std::_Select1st&lt;std::pair&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; const, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;, std::less&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; const, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt; &gt;::_M_get_insert_unique_pos (10,101,010 samples, 0.08%)</title><rect x="333.9" y="229" width="0.8" height="15.0" fill="rgb(238,154,36)" rx="2" ry="2" />
+<text  x="336.85" y="239.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::~IndexScanExecutor (101,010,100 samples, 0.76%)</title><rect x="373.2" y="229" width="9.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="376.21" y="239.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (10,101,010 samples, 0.08%)</title><rect x="381.3" y="69" width="0.9" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="384.27" y="79.5" ></text>
+</g>
+<g >
+<title>NestedLoopJoinExecutor::beginTuple (40,404,040 samples, 0.30%)</title><rect x="473.4" y="245" width="3.6" height="15.0" fill="rgb(251,213,50)" rx="2" ry="2" />
+<text  x="476.41" y="255.5" ></text>
+</g>
+<g >
+<title>malloc (10,101,010 samples, 0.08%)</title><rect x="522.6" y="165" width="0.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="525.62" y="175.5" ></text>
+</g>
+<g >
+<title>malloc@plt (20,202,020 samples, 0.15%)</title><rect x="1029.0" y="277" width="1.8" height="15.0" fill="rgb(246,192,46)" rx="2" ry="2" />
+<text  x="1031.97" y="287.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::unpin_page (131,313,130 samples, 0.99%)</title><rect x="485.0" y="197" width="11.7" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="488.04" y="207.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::cols (10,101,010 samples, 0.08%)</title><rect x="1004.8" y="261" width="0.9" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="1007.81" y="271.5" ></text>
+</g>
+<g >
+<title>TabCol::~TabCol (10,101,010 samples, 0.08%)</title><rect x="1016.4" y="245" width="0.9" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="1019.44" y="255.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;std::shared_ptr&lt;ast::SelectItem&gt;, std::allocator&lt;std::shared_ptr&lt;ast::SelectItem&gt; &gt; &gt;::_M_realloc_insert&lt;std::shared_ptr&lt;ast::SelectItem&gt; const&amp;&gt; (20,202,020 samples, 0.15%)</title><rect x="1169.4" y="261" width="1.8" height="15.0" fill="rgb(213,37,9)" rx="2" ry="2" />
+<text  x="1172.42" y="271.5" ></text>
+</g>
+<g >
+<title>DbMeta::get_table (10,101,010 samples, 0.08%)</title><rect x="1021.8" y="245" width="0.9" height="15.0" fill="rgb(226,96,23)" rx="2" ry="2" />
+<text  x="1024.81" y="255.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::fetch_page (30,303,030 samples, 0.23%)</title><rect x="975.3" y="181" width="2.7" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="978.29" y="191.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock (10,101,010 samples, 0.08%)</title><rect x="470.7" y="197" width="0.9" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="473.73" y="207.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::shared_ptr&lt;ast::SelectItem&gt;, std::allocator&lt;std::shared_ptr&lt;ast::SelectItem&gt; &gt; &gt;::operator= (10,101,010 samples, 0.08%)</title><rect x="1132.7" y="245" width="0.9" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="1135.74" y="255.5" ></text>
+</g>
+<g >
+<title>Planner::get_index_cols (20,202,020 samples, 0.15%)</title><rect x="364.3" y="245" width="1.8" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="367.27" y="255.5" ></text>
+</g>
+<g >
+<title>Portal::start (333,333,330 samples, 2.50%)</title><rect x="995.9" y="277" width="29.5" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="998.87" y="287.5" >Po..</text>
+</g>
+<g >
+<title>operator new (20,202,020 samples, 0.15%)</title><rect x="494.0" y="181" width="1.8" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="496.99" y="191.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::fetch_node (343,434,340 samples, 2.58%)</title><rect x="543.2" y="181" width="30.4" height="15.0" fill="rgb(251,213,51)" rx="2" ry="2" />
+<text  x="546.19" y="191.5" >Ix..</text>
+</g>
+<g >
+<title>std::vector&lt;Condition, std::allocator&lt;Condition&gt; &gt;::~vector (10,101,010 samples, 0.08%)</title><rect x="1005.7" y="229" width="0.9" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="1008.71" y="239.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock (30,303,030 samples, 0.23%)</title><rect x="490.4" y="181" width="2.7" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="493.41" y="191.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::pin (30,303,030 samples, 0.23%)</title><rect x="975.3" y="165" width="2.7" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="978.29" y="175.5" ></text>
+</g>
+<g >
+<title>strchrnul@plt (20,202,020 samples, 0.15%)</title><rect x="206.8" y="277" width="1.8" height="15.0" fill="rgb(239,156,37)" rx="2" ry="2" />
+<text  x="209.82" y="287.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_lock (30,303,030 samples, 0.23%)</title><rect x="567.3" y="165" width="2.7" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="570.35" y="175.5" ></text>
+</g>
+<g >
+<title>operator new (10,101,010 samples, 0.08%)</title><rect x="365.2" y="229" width="0.9" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="368.16" y="239.5" ></text>
+</g>
+<g >
+<title>strlen@plt (10,101,010 samples, 0.08%)</title><rect x="1009.3" y="229" width="0.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1012.29" y="239.5" ></text>
+</g>
+<g >
+<title>Analyze::analyze_select (40,404,040 samples, 0.30%)</title><rect x="323.1" y="245" width="3.6" height="15.0" fill="rgb(205,2,0)" rx="2" ry="2" />
+<text  x="326.12" y="255.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_lock (10,101,010 samples, 0.08%)</title><rect x="454.6" y="197" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="457.62" y="207.5" ></text>
+</g>
+<g >
+<title>SeqScanExecutor::is_end (10,101,010 samples, 0.08%)</title><rect x="476.1" y="229" width="0.9" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="479.10" y="239.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="208.6" y="213" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="211.61" y="223.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;LockDataId, std::pair&lt;LockDataId const, LockManager::LockRequestQueue&gt;, std::allocator&lt;std::pair&lt;LockDataId const, LockManager::LockRequestQueue&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;LockDataId&gt;, std::hash&lt;LockDataId&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt;, true&gt;::operator[] (151,515,150 samples, 1.14%)</title><rect x="580.8" y="181" width="13.4" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="583.77" y="191.5" ></text>
+</g>
+<g >
+<title>IxNodeHandle::lower_bound (10,101,010 samples, 0.08%)</title><rect x="1003.0" y="229" width="0.9" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="1006.03" y="239.5" ></text>
+</g>
+<g >
+<title>AbstractExecutor::NextBatch (10,101,010 samples, 0.08%)</title><rect x="479.7" y="229" width="0.9" height="15.0" fill="rgb(251,211,50)" rx="2" ry="2" />
+<text  x="482.67" y="239.5" ></text>
+</g>
+<g >
+<title>client_handler (9,909,090,810 samples, 74.37%)</title><rect x="309.7" y="293" width="877.6" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="312.70" y="303.5" >client_handler</text>
+</g>
+<g >
+<title>std::__detail::_List_node_base::_M_hook (10,101,010 samples, 0.08%)</title><rect x="495.8" y="181" width="0.9" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="498.78" y="191.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_lock (10,101,010 samples, 0.08%)</title><rect x="1002.1" y="213" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="1005.13" y="223.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;::~vector (10,101,010 samples, 0.08%)</title><rect x="1012.0" y="213" width="0.9" height="15.0" fill="rgb(253,223,53)" rx="2" ry="2" />
+<text  x="1014.97" y="223.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_lock (161,616,160 samples, 1.21%)</title><rect x="293.6" y="293" width="14.3" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="296.59" y="303.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;Condition, std::allocator&lt;Condition&gt; &gt;::_M_realloc_insert&lt;Condition const&amp;&gt; (20,202,020 samples, 0.15%)</title><rect x="336.5" y="245" width="1.8" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="339.54" y="255.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::unpin (20,202,020 samples, 0.15%)</title><rect x="488.6" y="181" width="1.8" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="491.62" y="191.5" ></text>
+</g>
+<g >
+<title>RmFileHandle::insert_record (30,303,030 samples, 0.23%)</title><rect x="454.6" y="229" width="2.7" height="15.0" fill="rgb(239,160,38)" rx="2" ry="2" />
+<text  x="457.62" y="239.5" ></text>
+</g>
+<g >
+<title>void std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;char*&gt; (10,101,010 samples, 0.08%)</title><rect x="358.9" y="165" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="361.90" y="175.5" ></text>
+</g>
+<g >
+<title>std::pair&lt;std::__detail::_Node_iterator&lt;LockDataId, true, true&gt;, bool&gt; std::_Hashtable&lt;LockDataId, LockDataId, std::allocator&lt;LockDataId&gt;, std::__detail::_Identity, std::equal_to&lt;LockDataId&gt;, std::hash&lt;LockDataId&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, true, true&gt; &gt;::_M_insert&lt;LockDataId const&amp;, std::__detail::_AllocNode&lt;std::allocator&lt;std::__detail::_Hash_node&lt;LockDataId, true&gt; &gt; &gt; &gt; (10,101,010 samples, 0.08%)</title><rect x="475.2" y="181" width="0.9" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="478.20" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_cond_destroy@@GLIBC_2.3.2 (20,202,020 samples, 0.15%)</title><rect x="434.0" y="213" width="1.8" height="15.0" fill="rgb(250,208,49)" rx="2" ry="2" />
+<text  x="437.05" y="223.5" ></text>
+</g>
+<g >
+<title>__pthread_rwlock_unlock (10,101,010 samples, 0.08%)</title><rect x="927.0" y="197" width="0.9" height="15.0" fill="rgb(240,161,38)" rx="2" ry="2" />
+<text  x="929.98" y="207.5" ></text>
+</g>
+<g >
+<title>eval_conds (10,101,010 samples, 0.08%)</title><rect x="479.7" y="165" width="0.9" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="482.67" y="175.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::operator= (10,101,010 samples, 0.08%)</title><rect x="458.2" y="245" width="0.9" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="461.20" y="255.5" ></text>
+</g>
+<g >
+<title>memcmp@plt (10,101,010 samples, 0.08%)</title><rect x="281.1" y="309" width="0.9" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="284.07" y="319.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__si_class_type_info::~__si_class_type_info (50,505,050 samples, 0.38%)</title><rect x="213.1" y="293" width="4.5" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="216.08" y="303.5" ></text>
+</g>
+<g >
+<title>TabCol::TabCol (10,101,010 samples, 0.08%)</title><rect x="337.4" y="213" width="0.9" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="340.43" y="223.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::unpin_page (10,101,010 samples, 0.08%)</title><rect x="465.4" y="213" width="0.9" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="468.36" y="223.5" ></text>
+</g>
+<g >
+<title>ast::TxnBegin::~TxnBegin (10,101,010 samples, 0.08%)</title><rect x="1158.7" y="245" width="0.9" height="15.0" fill="rgb(209,19,4)" rx="2" ry="2" />
+<text  x="1161.69" y="255.5" ></text>
+</g>
+<g >
+<title>cfree (10,101,010 samples, 0.08%)</title><rect x="383.1" y="229" width="0.8" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="386.06" y="239.5" ></text>
+</g>
+<g >
+<title>std::_Hash_bytes (10,101,010 samples, 0.08%)</title><rect x="1011.1" y="213" width="0.9" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="1014.08" y="223.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, std::pair&lt;PageId const, int&gt;, std::allocator&lt;std::pair&lt;PageId const, int&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;PageId&gt;, PageIdHash, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::find (10,101,010 samples, 0.08%)</title><rect x="451.0" y="197" width="0.9" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="454.05" y="207.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_assign (10,101,010 samples, 0.08%)</title><rect x="333.0" y="245" width="0.9" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="335.96" y="255.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::fetch_page (30,303,030 samples, 0.23%)</title><rect x="466.3" y="197" width="2.6" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="469.25" y="207.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::shared_ptr&lt;ast::BinaryExpr&gt;, std::allocator&lt;std::shared_ptr&lt;ast::BinaryExpr&gt; &gt; &gt;::operator= (10,101,010 samples, 0.08%)</title><rect x="1127.4" y="245" width="0.9" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="1130.38" y="255.5" ></text>
+</g>
+<g >
+<title>Analyze::get_clause (30,303,030 samples, 0.23%)</title><rect x="340.1" y="261" width="2.7" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="343.11" y="271.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::advance_to_next_match (30,303,030 samples, 0.23%)</title><rect x="462.7" y="229" width="2.7" height="15.0" fill="rgb(223,85,20)" rx="2" ry="2" />
+<text  x="465.68" y="239.5" ></text>
+</g>
+<g >
+<title>cfree (30,303,030 samples, 0.23%)</title><rect x="1151.5" y="261" width="2.7" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="1154.53" y="271.5" ></text>
+</g>
+<g >
+<title>std::shared_ptr&lt;ast::SetStmt&gt; std::dynamic_pointer_cast&lt;ast::SetStmt, ast::TreeNode&gt; (10,101,010 samples, 0.08%)</title><rect x="1187.3" y="293" width="0.9" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="1190.32" y="303.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_lock (10,101,010 samples, 0.08%)</title><rect x="450.2" y="213" width="0.8" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="453.15" y="223.5" ></text>
+</g>
+<g >
+<title>__libc_write (50,505,050 samples, 0.38%)</title><rect x="288.2" y="293" width="4.5" height="15.0" fill="rgb(238,154,37)" rx="2" ry="2" />
+<text  x="291.23" y="303.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::~IndexScanExecutor (10,101,010 samples, 0.08%)</title><rect x="1005.7" y="261" width="0.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1008.71" y="271.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_lock (20,202,020 samples, 0.15%)</title><rect x="444.8" y="229" width="1.8" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="447.78" y="239.5" ></text>
+</g>
+<g >
+<title>Planner::make_one_rel (131,313,130 samples, 0.99%)</title><rect x="352.6" y="213" width="11.7" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="355.64" y="223.5" ></text>
+</g>
+<g >
+<title>__pthread_rwlock_rdlock (30,303,030 samples, 0.23%)</title><rect x="924.3" y="197" width="2.7" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="927.30" y="207.5" ></text>
+</g>
+<g >
+<title>cfree (10,101,010 samples, 0.08%)</title><rect x="432.3" y="213" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="435.26" y="223.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;long, std::pair&lt;long const, Transaction*&gt;, std::allocator&lt;std::pair&lt;long const, Transaction*&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;long&gt;, std::hash&lt;long&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::erase (10,101,010 samples, 0.08%)</title><rect x="447.5" y="229" width="0.9" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="450.47" y="239.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::advance_to_next_match (5,545,454,490 samples, 41.62%)</title><rect x="483.3" y="213" width="491.1" height="15.0" fill="rgb(223,85,20)" rx="2" ry="2" />
+<text  x="486.25" y="223.5" >IndexScanExecutor::advance_to_next_match</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;LockDataId, std::pair&lt;LockDataId const, LockManager::LockRequestQueue&gt;, std::allocator&lt;std::pair&lt;LockDataId const, LockManager::LockRequestQueue&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;LockDataId&gt;, std::hash&lt;LockDataId&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::erase (50,505,050 samples, 0.38%)</title><rect x="439.4" y="213" width="4.5" height="15.0" fill="rgb(214,41,9)" rx="2" ry="2" />
+<text  x="442.42" y="223.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::cols (10,101,010 samples, 0.08%)</title><rect x="472.5" y="245" width="0.9" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="475.52" y="255.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (10,101,010 samples, 0.08%)</title><rect x="381.3" y="101" width="0.9" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="384.27" y="111.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_base&lt; (80,808,080 samples, 0.61%)</title><rect x="1159.6" y="245" width="7.1" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1162.58" y="255.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="208.6" y="229" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="211.61" y="239.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::pair&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; const, std::unique_ptr&lt;IxIndexHandle, std::default_delete&lt;IxIndexHandle&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; const, std::unique_ptr&lt;IxIndexHandle, std::default_delete&lt;IxIndexHandle&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt;, std::hash&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt;, true&gt;::at (10,101,010 samples, 0.08%)</title><rect x="1012.9" y="213" width="0.9" height="15.0" fill="rgb(208,16,4)" rx="2" ry="2" />
+<text  x="1015.87" y="223.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::unpin_page (10,101,010 samples, 0.08%)</title><rect x="454.6" y="213" width="0.9" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="457.62" y="223.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_replace (10,101,010 samples, 0.08%)</title><rect x="1156.9" y="261" width="0.9" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="1159.90" y="271.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;long, std::pair&lt;long const, std::unique_ptr&lt;RmRecord, std::default_delete&lt;RmRecord&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;long const, std::unique_ptr&lt;RmRecord, std::default_delete&lt;RmRecord&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;long&gt;, std::hash&lt;long&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::_M_insert_unique_node (10,101,010 samples, 0.08%)</title><rect x="456.4" y="197" width="0.9" height="15.0" fill="rgb(241,165,39)" rx="2" ry="2" />
+<text  x="459.41" y="207.5" ></text>
+</g>
+<g >
+<title>RmFileHandle::get_record (2,050,505,030 samples, 15.39%)</title><rect x="624.6" y="197" width="181.6" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="627.60" y="207.5" >RmFileHandle::get_record</text>
+</g>
+<g >
+<title>IndexScanExecutor::IndexScanExecutor (20,202,020 samples, 0.15%)</title><rect x="1011.1" y="229" width="1.8" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="1014.08" y="239.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Prime_rehash_policy::_M_next_bkt (10,101,010 samples, 0.08%)</title><rect x="360.7" y="181" width="0.9" height="15.0" fill="rgb(231,119,28)" rx="2" ry="2" />
+<text  x="363.69" y="191.5" ></text>
+</g>
+<g >
+<title>QlManager::run_dml (111,111,110 samples, 0.83%)</title><rect x="449.3" y="261" width="9.8" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="452.26" y="271.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (40,404,040 samples, 0.30%)</title><rect x="378.6" y="165" width="3.6" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="381.58" y="175.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, std::pair&lt;PageId const, int&gt;, std::allocator&lt;std::pair&lt;PageId const, int&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;PageId&gt;, PageIdHash, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::find (20,202,020 samples, 0.15%)</title><rect x="571.8" y="165" width="1.8" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="574.82" y="175.5" ></text>
+</g>
+<g >
+<title>IxScan::next (343,434,340 samples, 2.58%)</title><rect x="543.2" y="197" width="30.4" height="15.0" fill="rgb(216,55,13)" rx="2" ry="2" />
+<text  x="546.19" y="207.5" >Ix..</text>
+</g>
+<g >
+<title>BufferPoolManager::fetch_page (171,717,170 samples, 1.29%)</title><rect x="497.6" y="181" width="15.2" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="500.57" y="191.5" ></text>
+</g>
+<g >
+<title>Planner::build_source_scan_plan (60,606,060 samples, 0.45%)</title><rect x="356.2" y="197" width="5.4" height="15.0" fill="rgb(239,156,37)" rx="2" ry="2" />
+<text  x="359.22" y="207.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;ColMeta, std::allocator&lt;ColMeta&gt; &gt;::~vector (20,202,020 samples, 0.15%)</title><rect x="334.7" y="245" width="1.8" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="337.75" y="255.5" ></text>
+</g>
+<g >
+<title>operator new (20,202,020 samples, 0.15%)</title><rect x="523.5" y="165" width="1.8" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="526.51" y="175.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_lock (10,101,010 samples, 0.08%)</title><rect x="469.8" y="197" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="472.83" y="207.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;Condition, std::allocator&lt;Condition&gt; &gt;::~vector (10,101,010 samples, 0.08%)</title><rect x="362.5" y="197" width="0.9" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="365.48" y="207.5" ></text>
+</g>
+<g >
+<title>RmFileHandle::delete_record (10,101,010 samples, 0.08%)</title><rect x="450.2" y="229" width="0.8" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="453.15" y="239.5" ></text>
+</g>
+<g >
+<title>Planner::generate_select_plan (161,616,160 samples, 1.21%)</title><rect x="350.0" y="245" width="14.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="352.95" y="255.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="1014.7" y="229" width="0.8" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="1017.66" y="239.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::~IndexScanExecutor (10,101,010 samples, 0.08%)</title><rect x="383.9" y="229" width="0.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="386.95" y="239.5" ></text>
+</g>
+<g >
+<title>ProjectionExecutor::~ProjectionExecutor (161,616,160 samples, 1.21%)</title><rect x="373.2" y="261" width="14.3" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="376.21" y="271.5" ></text>
+</g>
+<g >
+<title>operator new (10,101,010 samples, 0.08%)</title><rect x="941.3" y="197" width="0.9" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="944.30" y="207.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__si_class_type_info::__do_dyncast (10,101,010 samples, 0.08%)</title><rect x="216.7" y="261" width="0.9" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="219.66" y="271.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (10,101,010 samples, 0.08%)</title><rect x="381.3" y="53" width="0.9" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="384.27" y="63.5" ></text>
+</g>
+<g >
+<title>__dynamic_cast (10,101,010 samples, 0.08%)</title><rect x="284.6" y="293" width="0.9" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="287.65" y="303.5" ></text>
+</g>
+<g >
+<title>[unknown] (40,404,040 samples, 0.30%)</title><rect x="208.6" y="293" width="3.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="211.61" y="303.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;TabCol, std::allocator&lt;TabCol&gt; &gt;::operator= (10,101,010 samples, 0.08%)</title><rect x="1018.2" y="245" width="0.9" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="1021.23" y="255.5" ></text>
+</g>
+<g >
+<title>RmScan::RmScan (10,101,010 samples, 0.08%)</title><rect x="474.3" y="213" width="0.9" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="477.31" y="223.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::find_leaf_page (30,303,030 samples, 0.23%)</title><rect x="1000.3" y="229" width="2.7" height="15.0" fill="rgb(238,154,36)" rx="2" ry="2" />
+<text  x="1003.34" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (10,101,010 samples, 0.08%)</title><rect x="208.6" y="277" width="0.9" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="211.61" y="287.5" ></text>
+</g>
+<g >
+<title>Planner::get_index_cols (10,101,010 samples, 0.08%)</title><rect x="356.2" y="181" width="0.9" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="359.22" y="191.5" ></text>
+</g>
+<g >
+<title>__dynamic_cast (10,101,010 samples, 0.08%)</title><rect x="1017.3" y="245" width="0.9" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="1020.34" y="255.5" ></text>
+</g>
+<g >
+<title>DeleteExecutor::Next (20,202,020 samples, 0.15%)</title><rect x="449.3" y="245" width="1.7" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="452.26" y="255.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::unpin_page (141,414,140 samples, 1.06%)</title><rect x="512.8" y="181" width="12.5" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="515.77" y="191.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::pin (10,101,010 samples, 0.08%)</title><rect x="455.5" y="181" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="458.52" y="191.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, std::pair&lt;PageId const, int&gt;, std::allocator&lt;std::pair&lt;PageId const, int&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;PageId&gt;, PageIdHash, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::find (10,101,010 samples, 0.08%)</title><rect x="471.6" y="197" width="0.9" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="474.62" y="207.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_ptr_inplace&lt;RmRecord, std::allocator&lt;RmRecord&gt;,  (10,101,010 samples, 0.08%)</title><rect x="383.9" y="197" width="0.9" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="386.95" y="207.5" ></text>
+</g>
+<g >
+<title>std::pair&lt;std::_Rb_tree_iterator&lt;std::pair&lt;int, int&gt; &gt;, bool&gt; std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_insert_unique&lt;std::pair&lt;int, int&gt; &gt; (10,101,010 samples, 0.08%)</title><rect x="464.5" y="213" width="0.9" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="467.47" y="223.5" ></text>
+</g>
+<g >
+<title>operator new (10,101,010 samples, 0.08%)</title><rect x="1154.2" y="261" width="0.9" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1157.22" y="271.5" ></text>
+</g>
+<g >
+<title>operator delete (10,101,010 samples, 0.08%)</title><rect x="940.4" y="197" width="0.9" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="943.40" y="207.5" ></text>
+</g>
+<g >
+<title>ScanPlan::ScanPlan (20,202,020 samples, 0.15%)</title><rect x="367.0" y="229" width="1.7" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="369.95" y="239.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::shared_ptr&lt;ast::Col&gt;, std::allocator&lt;std::shared_ptr&lt;ast::Col&gt; &gt; &gt;::operator= (10,101,010 samples, 0.08%)</title><rect x="1166.7" y="261" width="0.9" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="1169.74" y="271.5" ></text>
+</g>
+<g >
+<title>SeqScanExecutor::nextTuple (10,101,010 samples, 0.08%)</title><rect x="479.7" y="197" width="0.9" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="482.67" y="207.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_lock (10,101,010 samples, 0.08%)</title><rect x="564.7" y="149" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="567.66" y="159.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::unique_ptr&lt;RmRecord, std::default_delete&lt;RmRecord&gt; &gt;, std::allocator&lt;std::unique_ptr&lt;RmRecord, std::default_delete&lt;RmRecord&gt; &gt; &gt; &gt;::reserve (10,101,010 samples, 0.08%)</title><rect x="986.9" y="229" width="0.9" height="15.0" fill="rgb(226,100,23)" rx="2" ry="2" />
+<text  x="989.92" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (50,505,050 samples, 0.38%)</title><rect x="213.1" y="277" width="4.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="216.08" y="287.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (30,303,030 samples, 0.23%)</title><rect x="342.8" y="261" width="2.7" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="345.80" y="271.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (80,808,080 samples, 0.61%)</title><rect x="375.0" y="197" width="7.2" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="378.00" y="207.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Prime_rehash_policy::_M_next_bkt (10,101,010 samples, 0.08%)</title><rect x="596.0" y="181" width="0.9" height="15.0" fill="rgb(231,119,28)" rx="2" ry="2" />
+<text  x="598.97" y="191.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (50,505,050 samples, 0.38%)</title><rect x="377.7" y="181" width="4.5" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="380.69" y="191.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::upper_bound (10,101,010 samples, 0.08%)</title><rect x="1003.9" y="245" width="0.9" height="15.0" fill="rgb(245,185,44)" rx="2" ry="2" />
+<text  x="1006.92" y="255.5" ></text>
+</g>
+<g >
+<title>InsertExecutor::Next (70,707,070 samples, 0.53%)</title><rect x="451.0" y="245" width="6.3" height="15.0" fill="rgb(248,200,47)" rx="2" ry="2" />
+<text  x="454.05" y="255.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;ColMeta, std::allocator&lt;ColMeta&gt; &gt;::operator= (20,202,020 samples, 0.15%)</title><rect x="367.0" y="213" width="1.7" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="369.95" y="223.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;TabCol, std::allocator&lt;TabCol&gt; &gt;::~vector (20,202,020 samples, 0.15%)</title><rect x="385.7" y="245" width="1.8" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="388.74" y="255.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_append (10,101,010 samples, 0.08%)</title><rect x="1015.5" y="229" width="0.9" height="15.0" fill="rgb(222,79,19)" rx="2" ry="2" />
+<text  x="1018.55" y="239.5" ></text>
+</g>
+<g >
+<title>DbMeta::get_table (10,101,010 samples, 0.08%)</title><rect x="1020.9" y="245" width="0.9" height="15.0" fill="rgb(226,96,23)" rx="2" ry="2" />
+<text  x="1023.92" y="255.5" ></text>
+</g>
+<g >
+<title>NestedLoopJoinExecutor::advance_to_next_match (10,101,010 samples, 0.08%)</title><rect x="479.7" y="213" width="0.9" height="15.0" fill="rgb(212,35,8)" rx="2" ry="2" />
+<text  x="482.67" y="223.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (10,101,010 samples, 0.08%)</title><rect x="381.3" y="85" width="0.9" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="384.27" y="95.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::advance_to_next_match (20,202,020 samples, 0.15%)</title><rect x="997.7" y="245" width="1.7" height="15.0" fill="rgb(223,85,20)" rx="2" ry="2" />
+<text  x="1000.66" y="255.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (30,303,030 samples, 0.23%)</title><rect x="1103.2" y="261" width="2.7" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="1106.22" y="271.5" ></text>
+</g>
+<g >
+<title>__pthread_disable_asynccancel (10,101,010 samples, 0.08%)</title><rect x="292.7" y="293" width="0.9" height="15.0" fill="rgb(208,14,3)" rx="2" ry="2" />
+<text  x="295.70" y="303.5" ></text>
+</g>
+<g >
+<title>ast::BinaryExpr::~BinaryExpr (10,101,010 samples, 0.08%)</title><rect x="1165.0" y="213" width="0.8" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="1167.95" y="223.5" ></text>
+</g>
+<g >
+<title>TransactionManager::begin (20,202,020 samples, 0.15%)</title><rect x="387.5" y="245" width="1.8" height="15.0" fill="rgb(228,107,25)" rx="2" ry="2" />
+<text  x="390.53" y="255.5" ></text>
+</g>
+<g >
+<title>Portal::convert_plan_executor (10,101,010 samples, 0.08%)</title><rect x="371.4" y="277" width="0.9" height="15.0" fill="rgb(238,154,37)" rx="2" ry="2" />
+<text  x="374.43" y="287.5" ></text>
+</g>
+<g >
+<title>SeqScanExecutor::load_visible_current (10,101,010 samples, 0.08%)</title><rect x="475.2" y="213" width="0.9" height="15.0" fill="rgb(221,73,17)" rx="2" ry="2" />
+<text  x="478.20" y="223.5" ></text>
+</g>
+<g >
+<title>LockManager::lock (10,101,010 samples, 0.08%)</title><rect x="462.7" y="213" width="0.9" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="465.68" y="223.5" ></text>
+</g>
+<g >
+<title>RmFileHandle::fetch_page_handle_unlocked (10,101,010 samples, 0.08%)</title><rect x="453.7" y="229" width="0.9" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="456.73" y="239.5" ></text>
+</g>
+<g >
+<title>Portal::start (10,101,010 samples, 0.08%)</title><rect x="283.8" y="293" width="0.8" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="286.75" y="303.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::fetch_node (30,303,030 samples, 0.23%)</title><rect x="975.3" y="197" width="2.7" height="15.0" fill="rgb(251,213,51)" rx="2" ry="2" />
+<text  x="978.29" y="207.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_ptr_inplace&lt;ast::TableRef, std::allocator&lt;ast::TableRef&gt;,  (10,101,010 samples, 0.08%)</title><rect x="1165.8" y="229" width="0.9" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="1168.85" y="239.5" ></text>
+</g>
+<g >
+<title>Analyze::analyze_select (212,121,210 samples, 1.59%)</title><rect x="319.5" y="261" width="18.8" height="15.0" fill="rgb(205,2,0)" rx="2" ry="2" />
+<text  x="322.54" y="271.5" ></text>
+</g>
+<g >
+<title>void std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;char*&gt; (10,101,010 samples, 0.08%)</title><rect x="1023.6" y="245" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="1026.60" y="255.5" ></text>
+</g>
+<g >
+<title>Analyze::do_analyze (10,101,010 samples, 0.08%)</title><rect x="282.0" y="293" width="0.9" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="284.96" y="303.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::upper_bound (20,202,020 samples, 0.15%)</title><rect x="470.7" y="229" width="1.8" height="15.0" fill="rgb(245,185,44)" rx="2" ry="2" />
+<text  x="473.73" y="239.5" ></text>
+</g>
+<g >
+<title>LockManager::lock_shared_on_record (10,101,010 samples, 0.08%)</title><rect x="978.0" y="213" width="0.9" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="980.98" y="223.5" ></text>
+</g>
+<g >
+<title>EnsureStatementTransaction (10,101,010 samples, 0.08%)</title><rect x="282.9" y="293" width="0.9" height="15.0" fill="rgb(208,16,4)" rx="2" ry="2" />
+<text  x="285.86" y="303.5" ></text>
+</g>
+<g >
+<title>IxScan::next (40,404,040 samples, 0.30%)</title><rect x="974.4" y="213" width="3.6" height="15.0" fill="rgb(216,55,13)" rx="2" ry="2" />
+<text  x="977.40" y="223.5" ></text>
+</g>
+<g >
+<title>Portal::convert_plan_executor (141,414,140 samples, 1.06%)</title><rect x="1007.5" y="261" width="12.5" height="15.0" fill="rgb(238,154,37)" rx="2" ry="2" />
+<text  x="1010.50" y="271.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_lock (10,101,010 samples, 0.08%)</title><rect x="1003.9" y="213" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="1006.92" y="223.5" ></text>
+</g>
+<g >
+<title>Portal::run (7,040,403,970 samples, 52.84%)</title><rect x="372.3" y="277" width="623.6" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="375.32" y="287.5" >Portal::run</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_create (20,202,020 samples, 0.15%)</title><rect x="1188.2" y="309" width="1.8" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="1191.21" y="319.5" ></text>
+</g>
+<g >
+<title>Analyze::do_analyze (333,333,330 samples, 2.50%)</title><rect x="318.6" y="277" width="29.6" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="321.64" y="287.5" >An..</text>
+</g>
+<g >
+<title>std::_Sp_counted_ptr_inplace&lt;ScanPlan, std::allocator&lt;ScanPlan&gt;,  (10,101,010 samples, 0.08%)</title><rect x="1041.5" y="261" width="0.9" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="1044.49" y="271.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::lower_bound (10,101,010 samples, 0.08%)</title><rect x="1006.6" y="261" width="0.9" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="1009.60" y="271.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::beginTuple (90,909,090 samples, 0.68%)</title><rect x="996.8" y="261" width="8.0" height="15.0" fill="rgb(212,33,7)" rx="2" ry="2" />
+<text  x="999.76" y="271.5" ></text>
+</g>
+<g >
+<title>std::__detail::_List_node_base::_M_unhook (10,101,010 samples, 0.08%)</title><rect x="468.0" y="181" width="0.9" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="471.04" y="191.5" ></text>
+</g>
+<g >
+<title>QlManager::run_cmd_utility (696,969,690 samples, 5.23%)</title><rect x="387.5" y="261" width="61.8" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="390.53" y="271.5" >QlMana..</text>
+</g>
+<g >
+<title>__libc_read (30,303,030 samples, 0.23%)</title><rect x="285.5" y="293" width="2.7" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="288.54" y="303.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::beginTuple (10,101,010 samples, 0.08%)</title><rect x="473.4" y="229" width="0.9" height="15.0" fill="rgb(212,33,7)" rx="2" ry="2" />
+<text  x="476.41" y="239.5" ></text>
+</g>
+<g >
+<title>std::pair&lt;std::__detail::_Node_iterator&lt;LockDataId, true, true&gt;, bool&gt; std::_Hashtable&lt;LockDataId, LockDataId, std::allocator&lt;LockDataId&gt;, std::__detail::_Identity, std::equal_to&lt;LockDataId&gt;, std::hash&lt;LockDataId&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, true, true&gt; &gt;::_M_insert&lt;LockDataId const&amp;, std::__detail::_AllocNode&lt;std::allocator&lt;std::__detail::_Hash_node&lt;LockDataId, true&gt; &gt; &gt; &gt; (313,131,310 samples, 2.35%)</title><rect x="596.9" y="181" width="27.7" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="599.87" y="191.5" >s..</text>
+</g>
+<g >
+<title>__pthread_mutex_lock (101,010,100 samples, 0.76%)</title><rect x="913.6" y="197" width="8.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="916.56" y="207.5" ></text>
+</g>
+<g >
+<title>yyparse (1,606,060,590 samples, 12.05%)</title><rect x="1045.1" y="277" width="142.2" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="1048.07" y="287.5" >yyparse</text>
+</g>
+<g >
+<title>std::__shared_count&lt; (20,202,020 samples, 0.15%)</title><rect x="367.0" y="245" width="1.7" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="369.95" y="255.5" ></text>
+</g>
+<g >
+<title>std::pair&lt;std::__detail::_Node_iterator&lt;LockDataId, true, true&gt;, bool&gt; std::_Hashtable&lt;LockDataId, LockDataId, std::allocator&lt;LockDataId&gt;, std::__detail::_Identity, std::equal_to&lt;LockDataId&gt;, std::hash&lt;LockDataId&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, true, true&gt; &gt;::_M_insert&lt;LockDataId const&amp;, std::__detail::_AllocNode&lt;std::allocator&lt;std::__detail::_Hash_node&lt;LockDataId, true&gt; &gt; &gt; &gt; (10,101,010 samples, 0.08%)</title><rect x="973.5" y="197" width="0.9" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="976.50" y="207.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;LockDataId, LockDataId, std::allocator&lt;LockDataId&gt;, std::__detail::_Identity, std::equal_to&lt;LockDataId&gt;, std::hash&lt;LockDataId&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, true, true&gt; &gt;::_M_erase (40,404,040 samples, 0.30%)</title><rect x="435.8" y="213" width="3.6" height="15.0" fill="rgb(212,32,7)" rx="2" ry="2" />
+<text  x="438.84" y="223.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, std::pair&lt;PageId const, int&gt;, std::allocator&lt;std::pair&lt;PageId const, int&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;PageId&gt;, PageIdHash, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::find (101,010,100 samples, 0.76%)</title><rect x="534.2" y="181" width="9.0" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="537.25" y="191.5" ></text>
+</g>
+<g >
+<title>start_thread (10,232,323,130 samples, 76.80%)</title><rect x="282.0" y="309" width="906.2" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="284.96" y="319.5" >start_thread</text>
+</g>
+<g >
+<title>std::__detail::_List_node_base::_M_unhook (20,202,020 samples, 0.15%)</title><rect x="565.6" y="149" width="1.7" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="568.56" y="159.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree_insert_and_rebalance (80,808,080 samples, 0.61%)</title><rect x="945.8" y="197" width="7.1" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="948.77" y="207.5" ></text>
+</g>
+<g >
+<title>[unknown] (10,101,010 samples, 0.08%)</title><rect x="208.6" y="261" width="0.9" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="211.61" y="271.5" ></text>
+</g>
+<g >
+<title>rmdb (13,323,232,190 samples, 100.00%)</title><rect x="10.0" y="325" width="1180.0" height="15.0" fill="rgb(243,179,42)" rx="2" ry="2" />
+<text  x="13.00" y="335.5" >rmdb</text>
+</g>
+<g >
+<title>std::vector&lt;std::shared_ptr&lt;ast::Field&gt;, std::allocator&lt;std::shared_ptr&lt;ast::Field&gt; &gt; &gt;::operator= (20,202,020 samples, 0.15%)</title><rect x="1130.1" y="245" width="1.7" height="15.0" fill="rgb(251,213,50)" rx="2" ry="2" />
+<text  x="1133.06" y="255.5" ></text>
+</g>
+<g >
+<title>TabCol::TabCol (10,101,010 samples, 0.08%)</title><rect x="1018.2" y="229" width="0.9" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="1021.23" y="239.5" ></text>
+</g>
+<g >
+<title>malloc (10,101,010 samples, 0.08%)</title><rect x="939.5" y="197" width="0.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="942.51" y="207.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="359.8" y="181" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="362.80" y="191.5" ></text>
+</g>
+<g >
+<title>malloc (10,101,010 samples, 0.08%)</title><rect x="364.3" y="229" width="0.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="367.27" y="239.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::find_leaf_page (10,101,010 samples, 0.08%)</title><rect x="451.0" y="213" width="0.9" height="15.0" fill="rgb(238,154,36)" rx="2" ry="2" />
+<text  x="454.05" y="223.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::delete_entry (10,101,010 samples, 0.08%)</title><rect x="449.3" y="229" width="0.9" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="452.26" y="239.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Prime_rehash_policy::_M_next_bkt (10,101,010 samples, 0.08%)</title><rect x="388.4" y="229" width="0.9" height="15.0" fill="rgb(231,119,28)" rx="2" ry="2" />
+<text  x="391.42" y="239.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="384.8" y="229" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="387.84" y="239.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;long, std::pair&lt;long const, Transaction*&gt;, std::allocator&lt;std::pair&lt;long const, Transaction*&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;long&gt;, std::hash&lt;long&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt;, true&gt;::operator[] (10,101,010 samples, 0.08%)</title><rect x="448.4" y="245" width="0.9" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="451.36" y="255.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::unpin_page (10,101,010 samples, 0.08%)</title><rect x="997.7" y="213" width="0.9" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="1000.66" y="223.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_lock (20,202,020 samples, 0.15%)</title><rect x="510.1" y="165" width="1.8" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="513.09" y="175.5" ></text>
+</g>
+<g >
+<title>Analyze::check_clause (20,202,020 samples, 0.15%)</title><rect x="338.3" y="261" width="1.8" height="15.0" fill="rgb(214,41,9)" rx="2" ry="2" />
+<text  x="341.32" y="271.5" ></text>
+</g>
+<g >
+<title>strtol@plt (10,101,010 samples, 0.08%)</title><rect x="1167.6" y="261" width="0.9" height="15.0" fill="rgb(236,146,35)" rx="2" ry="2" />
+<text  x="1170.63" y="271.5" ></text>
+</g>
+<g >
+<title>TransactionManager::IsMvccTxn (10,101,010 samples, 0.08%)</title><rect x="1013.8" y="229" width="0.9" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1016.76" y="239.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_ptr_inplace&lt;Query, std::allocator&lt;Query&gt;,  (20,202,020 samples, 0.15%)</title><rect x="1039.7" y="261" width="1.8" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="1042.70" y="271.5" ></text>
+</g>
+<g >
+<title>ast::SemValue::operator= (363,636,360 samples, 2.73%)</title><rect x="1105.9" y="261" width="32.2" height="15.0" fill="rgb(212,33,7)" rx="2" ry="2" />
+<text  x="1108.91" y="271.5" >as..</text>
+</g>
+<g >
+<title>SeqScanExecutor::load_visible_current (10,101,010 samples, 0.08%)</title><rect x="479.7" y="181" width="0.9" height="15.0" fill="rgb(221,73,17)" rx="2" ry="2" />
+<text  x="482.67" y="191.5" ></text>
+</g>
+<g >
+<title>void std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;char*&gt; (10,101,010 samples, 0.08%)</title><rect x="347.3" y="261" width="0.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="350.27" y="271.5" ></text>
+</g>
+<g >
+<title>malloc@plt (10,101,010 samples, 0.08%)</title><rect x="493.1" y="181" width="0.9" height="15.0" fill="rgb(246,192,46)" rx="2" ry="2" />
+<text  x="496.09" y="191.5" ></text>
+</g>
+<g >
+<title>UpdateExecutor::~UpdateExecutor (10,101,010 samples, 0.08%)</title><rect x="992.3" y="261" width="0.9" height="15.0" fill="rgb(213,37,9)" rx="2" ry="2" />
+<text  x="995.29" y="271.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::unpin (10,101,010 samples, 0.08%)</title><rect x="997.7" y="197" width="0.9" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="1000.66" y="207.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="208.6" y="245" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="211.61" y="255.5" ></text>
+</g>
+<g >
+<title>cfree (10,101,010 samples, 0.08%)</title><rect x="329.4" y="245" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="332.38" y="255.5" ></text>
+</g>
+<g >
+<title>Portal::convert_plan_executor (10,101,010 samples, 0.08%)</title><rect x="1012.9" y="229" width="0.9" height="15.0" fill="rgb(238,154,37)" rx="2" ry="2" />
+<text  x="1015.87" y="239.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (70,707,070 samples, 0.53%)</title><rect x="426.0" y="213" width="6.3" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="429.00" y="223.5" ></text>
+</g>
+<g >
+<title>cfree (10,101,010 samples, 0.08%)</title><rect x="562.0" y="133" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="564.98" y="143.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (20,202,020 samples, 0.15%)</title><rect x="380.4" y="117" width="1.8" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="383.37" y="127.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;ColMeta, std::allocator&lt;ColMeta&gt; &gt;::operator= (10,101,010 samples, 0.08%)</title><rect x="1008.4" y="229" width="0.9" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="1011.39" y="239.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::~IndexScanExecutor (10,101,010 samples, 0.08%)</title><rect x="383.9" y="213" width="0.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="386.95" y="223.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;long, std::pair&lt;long const, std::unique_ptr&lt;RmRecord, std::default_delete&lt;RmRecord&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;long const, std::unique_ptr&lt;RmRecord, std::default_delete&lt;RmRecord&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;long&gt;, std::hash&lt;long&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::_M_rehash (10,101,010 samples, 0.08%)</title><rect x="456.4" y="181" width="0.9" height="15.0" fill="rgb(245,185,44)" rx="2" ry="2" />
+<text  x="459.41" y="191.5" ></text>
+</g>
+<g >
+<title>operator new (10,101,010 samples, 0.08%)</title><rect x="1037.0" y="277" width="0.9" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1040.02" y="287.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::beginTuple (111,111,110 samples, 0.83%)</title><rect x="462.7" y="245" width="9.8" height="15.0" fill="rgb(212,33,7)" rx="2" ry="2" />
+<text  x="465.68" y="255.5" ></text>
+</g>
+<g >
+<title>std::_MakeUniq&lt;UpdateExecutor&gt;::__single_object std::make_unique&lt;UpdateExecutor, SmManager*&amp;, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;&amp;, std::vector&lt;SetClause, std::allocator&lt;SetClause&gt; &gt;, std::vector&lt;Condition, std::allocator&lt;Condition&gt; &gt;, std::vector&lt;Rid, std::allocator&lt;Rid&gt; &gt;, Context*&amp;&gt; (30,303,030 samples, 0.23%)</title><rect x="1021.8" y="261" width="2.7" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="1024.81" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_rwlock_rdlock@plt (10,101,010 samples, 0.08%)</title><rect x="998.6" y="229" width="0.8" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="1001.55" y="239.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock (20,202,020 samples, 0.15%)</title><rect x="922.5" y="197" width="1.8" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="925.51" y="207.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::pin (80,808,080 samples, 0.61%)</title><rect x="502.9" y="165" width="7.2" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="505.93" y="175.5" ></text>
+</g>
+<g >
+<title>RmFileHandle::snapshot_rids (10,101,010 samples, 0.08%)</title><rect x="474.3" y="197" width="0.9" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="477.31" y="207.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;Condition, std::allocator&lt;Condition&gt; &gt;::_M_realloc_insert&lt;Condition const&amp;&gt; (10,101,010 samples, 0.08%)</title><rect x="341.9" y="245" width="0.9" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="344.90" y="255.5" ></text>
+</g>
+<g >
+<title>std::pair&lt;std::_Rb_tree_iterator&lt;std::pair&lt;int, int&gt; &gt;, bool&gt; std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_insert_unique&lt;std::pair&lt;int, int&gt; &gt; (232,323,230 samples, 1.74%)</title><rect x="952.9" y="197" width="20.6" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="955.93" y="207.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Prime_rehash_policy::_M_need_rehash (10,101,010 samples, 0.08%)</title><rect x="452.8" y="213" width="0.9" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="455.84" y="223.5" ></text>
+</g>
+<g >
+<title>TransactionManager::commit (646,464,640 samples, 4.85%)</title><rect x="389.3" y="245" width="57.3" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="392.32" y="255.5" >Transa..</text>
+</g>
+<g >
+<title>std::vector&lt;std::shared_ptr&lt;ast::Col&gt;, std::allocator&lt;std::shared_ptr&lt;ast::Col&gt; &gt; &gt;::operator= (20,202,020 samples, 0.15%)</title><rect x="1128.3" y="245" width="1.8" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="1131.27" y="255.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_ptr_inplace&lt;Query, std::allocator&lt;Query&gt;,  (10,101,010 samples, 0.08%)</title><rect x="1042.4" y="277" width="0.9" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="1045.39" y="287.5" ></text>
+</g>
+<g >
+<title>LogRecord::serialize (10,101,010 samples, 0.08%)</title><rect x="443.9" y="229" width="0.9" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="446.89" y="239.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_assign (10,101,010 samples, 0.08%)</title><rect x="1043.3" y="277" width="0.9" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="1046.28" y="287.5" ></text>
+</g>
+<g >
+<title>Portal::convert_plan_executor (70,707,070 samples, 0.53%)</title><rect x="1010.2" y="245" width="6.2" height="15.0" fill="rgb(238,154,37)" rx="2" ry="2" />
+<text  x="1013.18" y="255.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::get_rid (525,252,520 samples, 3.94%)</title><rect x="496.7" y="197" width="46.5" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="499.67" y="207.5" >IxIn..</text>
+</g>
+<g >
+<title>ast::UpdateStmt::~UpdateStmt (20,202,020 samples, 0.15%)</title><rect x="1164.1" y="229" width="1.7" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="1167.06" y="239.5" ></text>
+</g>
+<g >
+<title>ProjectionExecutor::NextBatch (5,767,676,710 samples, 43.29%)</title><rect x="477.0" y="245" width="510.8" height="15.0" fill="rgb(245,188,44)" rx="2" ry="2" />
+<text  x="479.99" y="255.5" >ProjectionExecutor::NextBatch</text>
+</g>
+<g >
+<title>LockManager::unlock (434,343,430 samples, 3.26%)</title><rect x="405.4" y="229" width="38.5" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="408.42" y="239.5" >Loc..</text>
+</g>
+<g >
+<title>std::__shared_count&lt; (10,101,010 samples, 0.08%)</title><rect x="1024.5" y="261" width="0.9" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="1027.50" y="271.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (90,909,090 samples, 0.68%)</title><rect x="374.1" y="213" width="8.1" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="377.11" y="223.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;::vector (10,101,010 samples, 0.08%)</title><rect x="369.6" y="245" width="0.9" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="372.64" y="255.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;Condition, std::allocator&lt;Condition&gt; &gt;::_M_erase (10,101,010 samples, 0.08%)</title><rect x="361.6" y="197" width="0.9" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="364.58" y="207.5" ></text>
+</g>
+<g >
+<title>ast::BinaryExpr::~BinaryExpr (10,101,010 samples, 0.08%)</title><rect x="1162.3" y="229" width="0.9" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="1165.27" y="239.5" ></text>
+</g>
+<g >
+<title>LockManager::lock (575,757,570 samples, 4.32%)</title><rect x="573.6" y="197" width="51.0" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="576.61" y="207.5" >LockM..</text>
+</g>
+<g >
+<title>__pthread_mutex_unlock (10,101,010 samples, 0.08%)</title><rect x="521.7" y="165" width="0.9" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="524.72" y="175.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Prime_rehash_policy::_M_need_rehash (20,202,020 samples, 0.15%)</title><rect x="594.2" y="181" width="1.8" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="597.18" y="191.5" ></text>
+</g>
+<g >
+<title>QlManager::select_from (6,020,201,960 samples, 45.19%)</title><rect x="459.1" y="261" width="533.2" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="462.10" y="271.5" >QlManager::select_from</text>
+</g>
+<g >
+<title>strtoll (10,101,010 samples, 0.08%)</title><rect x="1168.5" y="261" width="0.9" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="1171.53" y="271.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;::vector (10,101,010 samples, 0.08%)</title><rect x="363.4" y="197" width="0.9" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="366.37" y="207.5" ></text>
+</g>
+<g >
+<title>Planner::physical_optimization (141,414,140 samples, 1.06%)</title><rect x="351.7" y="229" width="12.6" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="354.74" y="239.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;int, std::pair&lt;int const, std::_List_iterator&lt;int&gt; &gt;, std::allocator&lt;std::pair&lt;int const, std::_List_iterator&lt;int&gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;int&gt;, std::hash&lt;int&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::_M_erase (20,202,020 samples, 0.15%)</title><rect x="562.9" y="133" width="1.8" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="565.87" y="143.5" ></text>
+</g>
+<g >
+<title>Value::~Value (10,101,010 samples, 0.08%)</title><rect x="328.5" y="245" width="0.9" height="15.0" fill="rgb(224,87,20)" rx="2" ry="2" />
+<text  x="331.48" y="255.5" ></text>
+</g>
+<g >
+<title>cfree (10,101,010 samples, 0.08%)</title><rect x="376.8" y="181" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="379.79" y="191.5" ></text>
+</g>
+<g >
+<title>operator new (20,202,020 samples, 0.15%)</title><rect x="331.2" y="245" width="1.8" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="334.17" y="255.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (1,868,686,850 samples, 14.03%)</title><rect x="10.0" y="309" width="165.5" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="13.00" y="319.5" >[libc-2.31.so]</text>
+</g>
+<g >
+<title>[libc-2.31.so] (30,303,030 samples, 0.23%)</title><rect x="987.8" y="245" width="2.7" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="990.82" y="255.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::pin (10,101,010 samples, 0.08%)</title><rect x="468.9" y="197" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="471.94" y="207.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::unpin (10,101,010 samples, 0.08%)</title><rect x="465.4" y="197" width="0.9" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="468.36" y="207.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::~IndexScanExecutor (121,212,120 samples, 0.91%)</title><rect x="373.2" y="245" width="10.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="376.21" y="255.5" ></text>
+</g>
+<g >
+<title>IxScan::next (10,101,010 samples, 0.08%)</title><rect x="984.2" y="229" width="0.9" height="15.0" fill="rgb(216,55,13)" rx="2" ry="2" />
+<text  x="987.24" y="239.5" ></text>
+</g>
+<g >
+<title>std::__detail::_List_node_base::_M_unhook (10,101,010 samples, 0.08%)</title><rect x="457.3" y="181" width="0.9" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="460.31" y="191.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;::_M_realloc_insert&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; const&amp;&gt; (10,101,010 samples, 0.08%)</title><rect x="1044.2" y="277" width="0.9" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="1047.18" y="287.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::lower_bound (60,606,060 samples, 0.45%)</title><rect x="465.4" y="229" width="5.3" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="468.36" y="239.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (373,737,370 samples, 2.81%)</title><rect x="175.5" y="293" width="33.1" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="178.50" y="303.5" >[l..</text>
+</g>
+<g >
+<title>ast::SelectStmt::~SelectStmt (10,101,010 samples, 0.08%)</title><rect x="1163.2" y="229" width="0.9" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="1166.16" y="239.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;ColMeta, std::allocator&lt;ColMeta&gt; &gt;::_M_realloc_insert&lt;ColMeta const&amp;&gt; (10,101,010 samples, 0.08%)</title><rect x="1019.1" y="245" width="0.9" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="1022.13" y="255.5" ></text>
+</g>
+<g >
+<title>__snprintf_chk (20,202,020 samples, 0.15%)</title><rect x="993.2" y="261" width="1.8" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="996.18" y="271.5" ></text>
+</g>
+<g >
+<title>Planner::do_planner (232,323,230 samples, 1.74%)</title><rect x="350.0" y="261" width="20.5" height="15.0" fill="rgb(228,108,25)" rx="2" ry="2" />
+<text  x="352.95" y="271.5" ></text>
+</g>
+<g >
+<title>operator delete (20,202,020 samples, 0.15%)</title><rect x="508.3" y="149" width="1.8" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="511.30" y="159.5" ></text>
+</g>
+<g >
+<title>std::__shared_count&lt; (151,515,150 samples, 1.14%)</title><rect x="1113.1" y="245" width="13.4" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="1116.06" y="255.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;std::thread::id, std::pair&lt;std::thread::id const, std::deque&lt;Transaction*, std::allocator&lt;Transaction*&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;std::thread::id const, std::deque&lt;Transaction*, std::allocator&lt;Transaction*&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;std::thread::id&gt;, std::hash&lt;std::thread::id&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt;, true&gt;::operator[] (10,101,010 samples, 0.08%)</title><rect x="387.5" y="229" width="0.9" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="390.53" y="239.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::operator= (10,101,010 samples, 0.08%)</title><rect x="346.4" y="261" width="0.9" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="349.38" y="271.5" ></text>
+</g>
+<g >
+<title>LRUReplacer::unpin (60,606,060 samples, 0.45%)</title><rect x="516.4" y="165" width="5.3" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="519.35" y="175.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__class_type_info::__do_dyncast (10,101,010 samples, 0.08%)</title><rect x="212.2" y="293" width="0.9" height="15.0" fill="rgb(253,225,53)" rx="2" ry="2" />
+<text  x="215.18" y="303.5" ></text>
+</g>
+<g >
+<title>cfree (10,101,010 samples, 0.08%)</title><rect x="927.9" y="197" width="0.9" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="930.88" y="207.5" ></text>
+</g>
+<g >
+<title>Condition::Condition (10,101,010 samples, 0.08%)</title><rect x="327.6" y="245" width="0.9" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="330.59" y="255.5" ></text>
+</g>
+<g >
+<title>LockManager::lock (20,202,020 samples, 0.15%)</title><rect x="451.9" y="229" width="1.8" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="454.94" y="239.5" ></text>
+</g>
+<g >
+<title>IndexScanExecutor::NextBatch (5,686,868,630 samples, 42.68%)</title><rect x="480.6" y="229" width="503.6" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="483.57" y="239.5" >IndexScanExecutor::NextBatch</text>
+</g>
+<g >
+<title>__dynamic_cast (10,101,010 samples, 0.08%)</title><rect x="370.5" y="261" width="0.9" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="373.53" y="271.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::find_leaf_page (50,505,050 samples, 0.38%)</title><rect x="466.3" y="213" width="4.4" height="15.0" fill="rgb(238,154,36)" rx="2" ry="2" />
+<text  x="469.25" y="223.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;long, std::pair&lt;long const, std::unique_ptr&lt;RmRecord, std::default_delete&lt;RmRecord&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;long const, std::unique_ptr&lt;RmRecord, std::default_delete&lt;RmRecord&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;long&gt;, std::hash&lt;long&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt;, true&gt;::operator[] (10,101,010 samples, 0.08%)</title><rect x="456.4" y="213" width="0.9" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="459.41" y="223.5" ></text>
+</g>
+<g >
+<title>malloc (10,101,010 samples, 0.08%)</title><rect x="1028.1" y="277" width="0.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1031.07" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown] (474,747,470 samples, 3.56%)</title><rect x="175.5" y="309" width="42.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="178.50" y="319.5" >[un..</text>
+</g>
+<g >
+<title>IxNodeHandle::lower_bound (10,101,010 samples, 0.08%)</title><rect x="449.3" y="213" width="0.9" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="452.26" y="223.5" ></text>
+</g>
+<g >
+<title>Condition&amp; std::vector&lt;Condition, std::allocator&lt;Condition&gt; &gt;::emplace_back&lt;Condition&gt; (10,101,010 samples, 0.08%)</title><rect x="355.3" y="197" width="0.9" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="358.32" y="207.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::get_rid (10,101,010 samples, 0.08%)</title><rect x="997.7" y="229" width="0.9" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="1000.66" y="239.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::unpin_page (10,101,010 samples, 0.08%)</title><rect x="1003.9" y="229" width="0.9" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="1006.92" y="239.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_base&lt; (10,101,010 samples, 0.08%)</title><rect x="1112.2" y="245" width="0.9" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1115.17" y="255.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, std::pair&lt;PageId const, int&gt;, std::allocator&lt;std::pair&lt;PageId const, int&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;PageId&gt;, PageIdHash, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::find (40,404,040 samples, 0.30%)</title><rect x="942.2" y="197" width="3.6" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="945.19" y="207.5" ></text>
+</g>
+<g >
+<title>cfree (20,202,020 samples, 0.15%)</title><rect x="307.9" y="293" width="1.8" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="310.91" y="303.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;LockDataId, LockDataId, std::allocator&lt;LockDataId&gt;, std::__detail::_Identity, std::equal_to&lt;LockDataId&gt;, std::hash&lt;LockDataId&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, true, true&gt; &gt;::_M_rehash (101,010,100 samples, 0.76%)</title><rect x="615.7" y="165" width="8.9" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="618.66" y="175.5" ></text>
+</g>
+<g >
+<title>[libc-2.31.so] (10,101,010 samples, 0.08%)</title><rect x="1008.4" y="213" width="0.9" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="1011.39" y="223.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;std::pair&lt;int, int&gt;, std::pair&lt;int, int&gt;, std::_Identity&lt;std::pair&lt;int, int&gt; &gt;, std::less&lt;std::pair&lt;int, int&gt; &gt;, std::allocator&lt;std::pair&lt;int, int&gt; &gt; &gt;::_M_erase (30,303,030 samples, 0.23%)</title><rect x="379.5" y="133" width="2.7" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="382.48" y="143.5" ></text>
+</g>
+<g >
+<title>LockManager::lock (10,101,010 samples, 0.08%)</title><rect x="475.2" y="197" width="0.9" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="478.20" y="207.5" ></text>
+</g>
+<g >
+<title>TransactionManager::release_transaction (20,202,020 samples, 0.15%)</title><rect x="446.6" y="245" width="1.8" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="449.57" y="255.5" ></text>
+</g>
+<g >
+<title>UpdateExecutor::Next (10,101,010 samples, 0.08%)</title><rect x="457.3" y="245" width="0.9" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="460.31" y="255.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_base&lt; (50,505,050 samples, 0.38%)</title><rect x="1037.9" y="277" width="4.5" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1040.92" y="287.5" ></text>
+</g>
+<g >
+<title>std::__detail::_List_node_base::_M_unhook (10,101,010 samples, 0.08%)</title><rect x="511.9" y="165" width="0.9" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="514.88" y="175.5" ></text>
+</g>
+<g >
+<title>RmFileHandle::get_record (10,101,010 samples, 0.08%)</title><rect x="463.6" y="213" width="0.9" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="466.57" y="223.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::fetch_page (10,101,010 samples, 0.08%)</title><rect x="457.3" y="197" width="0.9" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="460.31" y="207.5" ></text>
+</g>
+<g >
+<title>std::map&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::less&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; const, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt; &gt;::operator[] (10,101,010 samples, 0.08%)</title><rect x="333.9" y="245" width="0.8" height="15.0" fill="rgb(222,79,18)" rx="2" ry="2" />
+<text  x="336.85" y="255.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__class_type_info::__do_dyncast (10,101,010 samples, 0.08%)</title><rect x="217.6" y="309" width="0.8" height="15.0" fill="rgb(253,225,53)" rx="2" ry="2" />
+<text  x="220.55" y="319.5" ></text>
+</g>
+<g >
+<title>BufferPoolManager::fetch_page (10,101,010 samples, 0.08%)</title><rect x="473.4" y="181" width="0.9" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="476.41" y="191.5" ></text>
+</g>
+<g >
+<title>IxIndexHandle::lower_bound (50,505,050 samples, 0.38%)</title><rect x="999.4" y="245" width="4.5" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="1002.45" y="255.5" ></text>
+</g>
+<g >
+<title>ScanPlan::ScanPlan (10,101,010 samples, 0.08%)</title><rect x="366.1" y="245" width="0.9" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="369.06" y="255.5" ></text>
+</g>
+<g >
+<title>IxScan::~IxScan (10,101,010 samples, 0.08%)</title><rect x="382.2" y="229" width="0.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="385.16" y="239.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__si_class_type_info::__do_dyncast (20,202,020 samples, 0.15%)</title><rect x="218.4" y="309" width="1.8" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="221.45" y="319.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::shared_ptr&lt;ast::Value&gt;, std::allocator&lt;std::shared_ptr&lt;ast::Value&gt; &gt; &gt;::operator= (50,505,050 samples, 0.38%)</title><rect x="1133.6" y="245" width="4.5" height="15.0" fill="rgb(228,107,25)" rx="2" ry="2" />
+<text  x="1136.64" y="255.5" ></text>
+</g>
+</g>
+</svg>

@@ -1,0 +1,106 @@
+WSL2中使用perf做火焰图
+
+文章目录
+一、Perf
+1.安装步骤
+2.火焰图
+3.火焰图的含义
+二、自定义usleep命令
+三、参考
+一、Perf
+1.安装步骤
+（1）下载WSL2源码
+
+git clone --depth=1 https://github.com/microsoft/WSL2-Linux-Kernel.git
+或者
+git clone git@gitee.com:mirrors/WSL2-Linux-Kernel.git --depth=1
+（2）按照官方教程：Build Instructions
+
+Install the build dependencies:
+$ sudo apt install build-essential flex bison dwarves libssl-dev libelf-dev
+Build the kernel using the WSL2 kernel configuration:
+$ make KCONFIG_CONFIG=Microsoft/config-wsl
+（3）编译perf
+
+cd WSL2-Linux-Kernel/tools/perf
+make
+2.火焰图
+（1）下载火焰图生成工具：
+
+git clone https://github.com/brendangregg/FlameGraph.git
+（2）使用perf统计并得到火焰图
+
+perf record -F 99 -p 15533 -g -- sleep 30
+
+或者
+perf record -F 99 -g ./perf_test -- sleep 30
+
+或者
+perf record -e cpu-clock -g -p 38512 sleep 20
+perf record表示记录，
+-F 99表示每秒99次
+-F 指定采样频率为 99Hz(每秒99次), 如果 99次 都返回同一个函数名, 那就说明 CPU 这一秒钟都在执行同一个函数, 可能存在性能问题.
+
+没有使用 -e 指定采集事件, 则默认采集 cycles(即 CPU clock 周期)
+-p 15533是进程号，即对哪个进程进行分析，也可以对线程进行分析，
+-g表示记录调用栈，sleep 30则是持续30秒。
+（3）导出火焰图
+
+perf script -i perf.data &> perf.unfold
+./stackcollapse-perf.pl perf.unfold &> perf.folded
+./flamegraph.pl perf.folded > perf.svg
+3.火焰图的含义
+y 轴表示调用栈, 每一层都是一个函数. 调用栈越深, 火焰就越高, 顶部就是正在执行的函数, 下方都是它的父函数.
+
+x 轴表示抽样数, 如果一个函数在 x 轴占据的宽度越宽, 就表示它被抽到的次数多, 即执行的时间长. 注意, x 轴不代表时间, 而是所有的调用栈合并后, 按字母顺序排列的.
+
+火焰图就是看顶层的哪个函数占据的宽度最大. 只要有 “平顶”(plateaus), 就表示该函数可能存在性能问题。
+
+每一列代表一个调用栈，每一个格子代表一个函数。
+纵轴展示了栈的深度，按照调用关系从下到上排列。最顶上格子代表采样时，正在占用 CPU 的函数
+横轴的意义是指：火焰图将采集的多个调用栈信息，并行关系。横轴格子的宽度代表其在采样中出现频率，所以一个格子的宽度越大，说明它是瓶颈原因的可能性就越大。
+
+颜色没有特殊含义, 因为火焰图表示的是 CPU 的繁忙程度
+
+svg火焰图的其他操作：
+
+–鼠标悬浮
+火焰的每一层都会标注函数名，鼠标悬浮时会显示完整的函数名、抽样抽中的次数、占据总抽样次数的百分比。
+
+–点击放大
+在某一层点击，火焰图会水平放大，该层会占据所有宽度，显示详细信息。左上角会同时显示"Reset Zoom"，点击该链接，图片就会恢复原样。
+
+–搜索
+按下 Ctrl + F 会显示一个搜索框，用户可以输入关键词或正则表达式，所有符合条件的函数名会高亮显示。
+
+二、自定义usleep命令
+#include <stdio.h>
+#include <unistd.h>
+
+int isNumber ( char* number );
+
+int main ( int argc, char** argv ) {
+
+    if ( argc < 2 ) {
+        printf( "USAGE:\r\n" );
+        printf( " usleep <Number of microseconds>\r\n" );
+        return -1;
+    }
+
+    if ( isNumber( argv[1] ) ) {
+        printf( "Please input a number string.\r\n" );
+        return -1;
+    }
+
+    usleep( atoi(argv[1]) );
+}
+
+int isNumber ( char* number ) {
+
+    int i = 0;
+    for ( ; number[i] != 0; i++ ) 
+        if ( isdigit( number[i] ) == 0 ) 
+            return -1;
+
+    return 0;
+}
