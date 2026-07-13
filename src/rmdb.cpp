@@ -17,6 +17,7 @@ See the Mulan PSL v2 for more details. */
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <string_view>
 #include "errors.h"
@@ -66,6 +67,16 @@ static bool is_transaction_control_query(const std::shared_ptr<Query> &query) {
            std::dynamic_pointer_cast<ast::StaticCheckpoint>(query->parse) != nullptr;
 }
 
+static bool is_transaction_end_query(const std::shared_ptr<Query> &query) {
+    return std::dynamic_pointer_cast<ast::TxnCommit>(query->parse) != nullptr ||
+           std::dynamic_pointer_cast<ast::TxnAbort>(query->parse) != nullptr ||
+           std::dynamic_pointer_cast<ast::TxnRollback>(query->parse) != nullptr;
+}
+
+static bool is_transaction_begin_query(const std::shared_ptr<Query> &query) {
+    return std::dynamic_pointer_cast<ast::TxnBegin>(query->parse) != nullptr;
+}
+
 static bool is_session_only_query(const std::shared_ptr<Query> &query) {
     return std::dynamic_pointer_cast<ast::SetIsolationStmt>(query->parse) != nullptr ||
            std::dynamic_pointer_cast<ast::SetStmt>(query->parse) != nullptr;
@@ -95,6 +106,60 @@ static void AbortActiveTransaction(txn_id_t *txn_id, Context *context) {
     txn_manager->release_transaction(context->txn_);
     *txn_id = INVALID_TXN_ID;
     context->txn_ = nullptr;
+}
+
+static bool IsExplicitActiveTransaction(txn_id_t txn_id, Context *context) {
+    Transaction *txn = context != nullptr ? context->txn_ : nullptr;
+    if (txn == nullptr && txn_id != INVALID_TXN_ID) {
+        txn = txn_manager->get_transaction(txn_id);
+    }
+    return txn != nullptr && txn->get_txn_mode() &&
+           txn->get_state() != TransactionState::COMMITTED &&
+           txn->get_state() != TransactionState::ABORTED;
+}
+
+static void SetResponse(Context *context, const std::string &str) {
+    memcpy(context->data_send_, str.c_str(), str.length());
+    context->data_send_[str.length()] = '\0';
+    *(context->offset_) = str.length();
+}
+
+static void WriteOutputLine(bool output_file_enabled, const std::string &str) {
+    if (!output_file_enabled) {
+        return;
+    }
+    std::fstream outfile;
+    outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
+    outfile << str;
+    outfile.close();
+}
+
+static bool FinishImplicitTransaction(txn_id_t *txn_id, Context *context, bool output_file_enabled) {
+    if (context->txn_ == nullptr || context->txn_->get_txn_mode() ||
+        context->txn_->get_state() == TransactionState::COMMITTED ||
+        context->txn_->get_state() == TransactionState::ABORTED) {
+        return true;
+    }
+    try {
+        txn_manager->commit(context->txn_, context->log_mgr_);
+        txn_manager->release_transaction(context->txn_);
+        context->txn_ = nullptr;
+        *txn_id = INVALID_TXN_ID;
+        return true;
+    } catch (TransactionAbortException &) {
+        SetResponse(context, "abort\n");
+        AbortActiveTransaction(txn_id, context);
+        WriteOutputLine(output_file_enabled, "abort\n");
+        return false;
+    } catch (RMDBError &e) {
+        AbortActiveTransaction(txn_id, context);
+        memcpy(context->data_send_, e.what(), e.get_msg_len());
+        context->data_send_[e.get_msg_len()] = '\n';
+        context->data_send_[e.get_msg_len() + 1] = '\0';
+        *(context->offset_) = e.get_msg_len() + 1;
+        WriteOutputLine(output_file_enabled, "failure\n");
+        return false;
+    }
 }
 
 static void AbortTransactionById(txn_id_t *txn_id) {
@@ -135,6 +200,27 @@ static bool iequals(std::string_view lhs, const char *rhs) {
         }
     }
     return true;
+}
+
+static bool command_equals(std::string_view cmd, const char *keyword) {
+    while (!cmd.empty() && std::isspace(static_cast<unsigned char>(cmd.back()))) {
+        cmd.remove_suffix(1);
+    }
+    if (!cmd.empty() && cmd.back() == ';') {
+        cmd.remove_suffix(1);
+    }
+    while (!cmd.empty() && std::isspace(static_cast<unsigned char>(cmd.back()))) {
+        cmd.remove_suffix(1);
+    }
+    return iequals(cmd, keyword);
+}
+
+static bool command_is_transaction_begin(std::string_view cmd) {
+    return command_equals(cmd, "begin");
+}
+
+static bool command_is_transaction_end(std::string_view cmd) {
+    return command_equals(cmd, "commit") || command_equals(cmd, "abort") || command_equals(cmd, "rollback");
 }
 
 static bool next_token(std::string_view s, size_t *pos, std::string_view *token) {
@@ -193,6 +279,8 @@ void *client_handler(void *sock_fd) {
     txn_id_t txn_id = INVALID_TXN_ID;
     IsolationLevel session_isolation_level = IsolationLevel::READ_COMMITTED;
     bool output_file_enabled = true;
+    bool explicit_txn_open = false;
+    bool explicit_txn_aborted = false;
 
     while (true) {
         memset(data_recv, 0, BUFFER_LENGTH);
@@ -207,6 +295,8 @@ void *client_handler(void *sock_fd) {
         }
 
         const std::string_view raw_cmd = trim_command_view(data_recv, i_recvBytes);
+        const bool raw_txn_begin = command_is_transaction_begin(raw_cmd);
+        const bool raw_txn_end = command_is_transaction_end(raw_cmd);
         if (iequals(raw_cmd, "exit")) {
             break;
         }
@@ -232,42 +322,32 @@ void *client_handler(void *sock_fd) {
         std::string load_file;
         std::string load_table;
         if (parse_load_command(raw_cmd, load_file, load_table)) {
-            try {
-                EnsureStatementTransaction(&txn_id, &context, session_isolation_level);
-                sm_manager->load_table(load_file, load_table, &context);
-            } catch (TransactionAbortException &e) {
-                std::string str = "abort\n";
-                memcpy(data_send, str.c_str(), str.length());
-                data_send[str.length()] = '\0';
-                offset = str.length();
-                AbortActiveTransaction(&txn_id, &context);
-                if (output_file_enabled) {
-                    std::fstream outfile;
-                    outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-                    outfile << str;
-                    outfile.close();
+            if (explicit_txn_aborted) {
+                SetResponse(&context, "abort\n");
+                WriteOutputLine(output_file_enabled, "abort\n");
+            } else {
+                try {
+                    EnsureStatementTransaction(&txn_id, &context, session_isolation_level);
+                    sm_manager->load_table(load_file, load_table, &context);
+                } catch (TransactionAbortException &e) {
+                    if (explicit_txn_open) {
+                        explicit_txn_aborted = true;
+                    }
+                    SetResponse(&context, "abort\n");
+                    AbortActiveTransaction(&txn_id, &context);
+                    WriteOutputLine(output_file_enabled, "abort\n");
+                } catch (RMDBError &e) {
+                    if (explicit_txn_open) {
+                        explicit_txn_aborted = true;
+                    }
+                    AbortActiveTransaction(&txn_id, &context);
+                    memcpy(data_send, e.what(), e.get_msg_len());
+                    data_send[e.get_msg_len()] = '\n';
+                    data_send[e.get_msg_len() + 1] = '\0';
+                    offset = e.get_msg_len() + 1;
+                    WriteOutputLine(output_file_enabled, "failure\n");
                 }
-            } catch (RMDBError &e) {
-                AbortActiveTransaction(&txn_id, &context);
-                memcpy(data_send, e.what(), e.get_msg_len());
-                data_send[e.get_msg_len()] = '\n';
-                data_send[e.get_msg_len() + 1] = '\0';
-                offset = e.get_msg_len() + 1;
-                if (output_file_enabled) {
-                    std::fstream outfile;
-                    outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-                    outfile << "failure\n";
-                    outfile.close();
-                }
-            }
-            if(context.txn_ != nullptr && context.txn_->get_txn_mode() == false &&
-               context.txn_->get_state() != TransactionState::COMMITTED &&
-               context.txn_->get_state() != TransactionState::ABORTED)
-            {
-                txn_manager->commit(context.txn_, context.log_mgr_);
-                txn_manager->release_transaction(context.txn_);
-                context.txn_ = nullptr;
-                txn_id = INVALID_TXN_ID;
+                FinishImplicitTransaction(&txn_id, &context, output_file_enabled);
             }
             if (write(fd, data_send, offset + 1) == -1) {
                 break;
@@ -287,36 +367,56 @@ void *client_handler(void *sock_fd) {
                     yy_delete_buffer(buf);
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
-                    if (query_needs_transaction(query)) {
-                        EnsureStatementTransaction(&txn_id, &context, session_isolation_level);
+                    bool skip_current_query = false;
+                    if (explicit_txn_aborted) {
+                        if (raw_txn_end) {
+                            explicit_txn_aborted = false;
+                            explicit_txn_open = false;
+                            SetResponse(&context, "abort\n");
+                            WriteOutputLine(output_file_enabled, "abort\n");
+                            skip_current_query = true;
+                        } else if (!is_session_only_query(query)) {
+                            SetResponse(&context, "abort\n");
+                            WriteOutputLine(output_file_enabled, "abort\n");
+                            skip_current_query = true;
+                        }
                     }
-                    // 优化器
-                    std::shared_ptr<Plan> plan = optimizer->plan_query(query, &context);
-                    // portal
-                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, &context);
-                    portal->run(portalStmt, ql_manager.get(), &txn_id, &context);
-                    portal->drop();
-                    if (std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
-                        isolation_output_format.store(true);
+                    if (!skip_current_query) {
+                        if (query_needs_transaction(query)) {
+                            EnsureStatementTransaction(&txn_id, &context, session_isolation_level);
+                        }
+                        // 优化器
+                        std::shared_ptr<Plan> plan = optimizer->plan_query(query, &context);
+                        // portal
+                        std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, &context);
+                        portal->run(portalStmt, ql_manager.get(), &txn_id, &context);
+                        portal->drop();
+                        if (raw_txn_begin) {
+                            explicit_txn_open = txn_id != INVALID_TXN_ID;
+                        } else if (raw_txn_end) {
+                            explicit_txn_open = false;
+                            explicit_txn_aborted = false;
+                        }
+                        if (std::dynamic_pointer_cast<SetIsolationPlan>(plan) != nullptr) {
+                            isolation_output_format.store(true);
+                        }
                     }
                 } catch (TransactionAbortException &e) {
                     // 事务需要回滚，需要把abort信息返回给客户端并写入output.txt文件中
-                    std::string str = "abort\n";
-                    memcpy(data_send, str.c_str(), str.length());
-                    data_send[str.length()] = '\0';
-                    offset = str.length();
+                    if (explicit_txn_open || IsExplicitActiveTransaction(txn_id, &context)) {
+                        explicit_txn_aborted = true;
+                    }
+                    SetResponse(&context, "abort\n");
 
                     // 回滚事务
                     AbortActiveTransaction(&txn_id, &context);
 
-                    if (output_file_enabled) {
-                        std::fstream outfile;
-                        outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-                        outfile << str;
-                        outfile.close();
-                    }
+                    WriteOutputLine(output_file_enabled, "abort\n");
                 } catch (RMDBError &e) {
                     // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
+                    if (explicit_txn_open || IsExplicitActiveTransaction(txn_id, &context)) {
+                        explicit_txn_aborted = true;
+                    }
                     AbortActiveTransaction(&txn_id, &context);
 
                     memcpy(data_send, e.what(), e.get_msg_len());
@@ -325,26 +425,13 @@ void *client_handler(void *sock_fd) {
                     offset = e.get_msg_len() + 1;
 
                     // 将报错信息写入output.txt
-                    if (output_file_enabled) {
-                        std::fstream outfile;
-                        outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-                        outfile << "failure\n";
-                        outfile.close();
-                    }
+                    WriteOutputLine(output_file_enabled, "failure\n");
                 }
             }
         } else {
-            std::string str = "failure\n";
-            memcpy(data_send, str.c_str(), str.length());
-            data_send[str.length()] = '\0';
-            offset = str.length();
+            SetResponse(&context, "failure\n");
 
-            if (output_file_enabled) {
-                std::fstream outfile;
-                outfile.open(sm_manager->db_.name() + "/output.txt", std::ios::out | std::ios::app);
-                outfile << "failure\n";
-                outfile.close();
-            }
+            WriteOutputLine(output_file_enabled, "failure\n");
         }
         if(finish_analyze == false) {
             yy_delete_buffer(buf);
@@ -353,15 +440,7 @@ void *client_handler(void *sock_fd) {
         // future TODO: 格式化 sql_handler.result, 传给客户端
         // send result with fixed format, use protobuf in the future
         // 如果是单挑语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务
-        if(context.txn_ != nullptr && context.txn_->get_txn_mode() == false &&
-           context.txn_->get_state() != TransactionState::COMMITTED &&
-           context.txn_->get_state() != TransactionState::ABORTED)
-        {
-            txn_manager->commit(context.txn_, context.log_mgr_);
-            txn_manager->release_transaction(context.txn_);
-            context.txn_ = nullptr;
-            txn_id = INVALID_TXN_ID;
-        }
+        FinishImplicitTransaction(&txn_id, &context, output_file_enabled);
         if (write(fd, data_send, offset + 1) == -1) {
             break;
         }

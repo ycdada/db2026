@@ -88,11 +88,9 @@ class InsertExecutor : public AbstractExecutor {
         if (context_ != nullptr && context_->txn_mgr_ != nullptr) {
             context_->txn_mgr_->RegisterPhysicalInsert(fh_->GetFd(), rid_, context_->txn_);
         }
-        bool write_record_appended = false;
-        if (version_writes && context_->txn_ != nullptr) {
+        if (context_->txn_ != nullptr) {
             context_->txn_->append_write_record(
                 new WriteRecord(WType::INSERT_TUPLE, tab_name_, fh_->GetFd(), rid_, rec));
-            write_record_appended = true;
         }
         // Insert into index
         std::vector<std::pair<IxIndexHandle *, std::vector<char>>> inserted_index_entries;
@@ -144,10 +142,6 @@ class InsertExecutor : public AbstractExecutor {
             lsn_t lsn = context_->log_mgr_->add_log_record(&log);
             context_->txn_->set_prev_lsn(lsn);
             fh_->set_page_lsn(rid_, lsn);
-        }
-        if (!write_record_appended && context_->txn_ != nullptr) {
-            context_->txn_->append_write_record(
-                new WriteRecord(WType::INSERT_TUPLE, tab_name_, fh_->GetFd(), rid_, rec));
         }
         return nullptr;
     }

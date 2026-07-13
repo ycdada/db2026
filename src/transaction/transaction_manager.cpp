@@ -969,6 +969,15 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     // 如果需要支持MVCC请在上述过程中添加代码
     if (txn == nullptr) return;
 
+    auto write_set = txn->get_write_set();
+    bool has_writes = !write_set->empty() || !txn->mvcc_write_keys().empty();
+    if (has_writes && log_manager != nullptr) {
+        CommitLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
+        lsn_t lsn = log_manager->add_log_record(&log);
+        txn->set_prev_lsn(lsn);
+        log_manager->flush_log_to_disk(lsn);
+    }
+
     if (txn->is_mvcc() || !txn->mvcc_write_keys().empty()) {
         timestamp_t commit_ts;
         {
@@ -1008,8 +1017,6 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         }
     }
 
-    auto write_set = txn->get_write_set();
-    bool has_writes = !write_set->empty() || !txn->mvcc_write_keys().empty();
     while (!write_set->empty()) {
         WriteRecord *write_record = write_set->back();
         if (write_record->GetWriteType() == WType::INSERT_TUPLE) {
@@ -1033,12 +1040,6 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
 
     // 更新事务状态
     txn->set_state(TransactionState::COMMITTED);
-    if (has_writes && log_manager != nullptr) {
-        CommitLogRecord log(txn->get_transaction_id(), txn->get_prev_lsn());
-        lsn_t lsn = log_manager->add_log_record(&log);
-        txn->set_prev_lsn(lsn);
-        log_manager->flush_log_to_disk(lsn);
-    }
 }
 
 /**
