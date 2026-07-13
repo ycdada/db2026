@@ -24,6 +24,8 @@ See the Mulan PSL v2 for more details. */
 #include "replacer/lru_replacer.h"
 #include "replacer/replacer.h"
 
+class LogManager;
+
 class BufferPoolManager {
    private:
     struct Shard {
@@ -40,6 +42,7 @@ class BufferPoolManager {
     Page *pages_;           // buffer_pool中的Page对象数组，在构造空间中申请内存空间，在析构函数中释放，大小为BUFFER_POOL_SIZE
     std::vector<std::unique_ptr<Shard>> shards_;
     DiskManager *disk_manager_;
+    LogManager *log_manager_ = nullptr;
 
    public:
     BufferPoolManager(size_t pool_size, DiskManager *disk_manager)
@@ -65,6 +68,8 @@ class BufferPoolManager {
      * @param {Page*} page 脏页
      */
     static void mark_dirty(Page* page) { page->is_dirty_ = true; }
+
+    void set_log_manager(LogManager *log_manager) { log_manager_ = log_manager; }
 
    public: 
     Page* fetch_page(PageId page_id);
@@ -93,4 +98,6 @@ class BufferPoolManager {
     bool find_victim_page(Shard& shard, frame_id_t* frame_id);
 
     void update_page(Shard& shard, Page* page, PageId new_page_id, frame_id_t new_frame_id);
+
+    void flush_page_log(Page *page);
 };

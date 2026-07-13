@@ -9,4 +9,8 @@ BufferPoolManagerTest_db/
 tmp_*_db/
 q8_*_db/
 repro9_*/
-profiling
+profilingFlameGraph/
+WSL2-Linux-Kernel/
+FlameGraph/
+WSL2-Linux-Kernel/
+build-perf/

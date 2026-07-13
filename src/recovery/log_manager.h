@@ -373,6 +373,7 @@ private:
     std::condition_variable flush_cv_;
     bool flush_in_progress_{false};
     LogBuffer log_buffer_;              // 日志缓冲区
+    lsn_t log_buffer_max_lsn_ = INVALID_LSN;
     lsn_t persist_lsn_;                 // 记录已经持久化到磁盘中的最后一条日志的日志号
     DiskManager* disk_manager_;
     std::unique_ptr<LogBuffer> flush_buffer_;  // 正在刷盘的日志批次副本

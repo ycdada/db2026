@@ -190,6 +190,20 @@ void RmFileHandle::update_record(const Rid& rid, char* buf, Context* context) {
 
 }
 
+void RmFileHandle::set_page_lsn(const Rid &rid, lsn_t lsn) {
+    if (lsn == INVALID_LSN) {
+        return;
+    }
+    std::unique_lock<std::shared_mutex> guard(latch_);
+    ensure_open_locked();
+    std::shared_lock<std::shared_mutex> state_guard(shared_state_->latch);
+    file_hdr_ = shared_state_->file_hdr;
+    RmPageHandle page_handle = fetch_page_handle_unlocked(rid.page_no);
+    page_handle.page->set_page_lsn(lsn);
+    buffer_pool_manager_->mark_dirty(page_handle.page);
+    buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
+}
+
 void RmFileHandle::reset_data_pages() {
     std::unique_lock<std::shared_mutex> guard(latch_);
     ensure_open_locked();

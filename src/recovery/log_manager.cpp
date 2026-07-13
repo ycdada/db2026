@@ -13,6 +13,40 @@ See the Mulan PSL v2 for more details. */
 #include "errors.h"
 #include "log_manager.h"
 
+namespace {
+
+bool advance_checked(size_t &offset, size_t amount, size_t total_len) {
+    if (amount > total_len || offset > total_len - amount) {
+        return false;
+    }
+    offset += amount;
+    return true;
+}
+
+bool validate_record_with_table_name(const char *src, size_t total_len, bool has_two_records) {
+    size_t offset = OFFSET_LOG_DATA;
+    for (int i = 0; i < (has_two_records ? 2 : 1); ++i) {
+        if (!advance_checked(offset, sizeof(int), total_len)) {
+            return false;
+        }
+        int rec_size = *reinterpret_cast<const int *>(src + offset - sizeof(int));
+        if (rec_size < 0 || !advance_checked(offset, static_cast<size_t>(rec_size), total_len)) {
+            return false;
+        }
+    }
+    if (!advance_checked(offset, sizeof(Rid), total_len) ||
+        !advance_checked(offset, sizeof(size_t), total_len)) {
+        return false;
+    }
+    size_t table_name_size = *reinterpret_cast<const size_t *>(src + offset - sizeof(size_t));
+    if (!advance_checked(offset, table_name_size, total_len)) {
+        return false;
+    }
+    return offset == total_len;
+}
+
+}  // namespace
+
 /**
  * @description: 添加日志记录到日志缓冲区中，并返回日志记录号
  * @param {LogRecord*} log_record 要写入缓冲区的日志记录
@@ -29,6 +63,7 @@ lsn_t LogManager::add_log_to_buffer(LogRecord* log_record) {
     log_record->lsn_ = global_lsn_.fetch_add(1);
     log_record->serialize(log_buffer_.buffer_ + log_buffer_.offset_);
     log_buffer_.offset_ += log_record->log_tot_len_;
+    log_buffer_max_lsn_ = log_record->lsn_;
     return log_record->lsn_;
 }
 
@@ -45,8 +80,9 @@ void LogManager::flush_buffer_locked(std::unique_lock<std::mutex> &lock) {
 
     std::memcpy(flush_buffer_->buffer_, log_buffer_.buffer_, log_buffer_.offset_);
     flush_buffer_->offset_ = log_buffer_.offset_;
-    lsn_t flush_lsn = global_lsn_.load(std::memory_order_acquire) - 1;
+    lsn_t flush_lsn = log_buffer_max_lsn_;
     log_buffer_.offset_ = 0;
+    log_buffer_max_lsn_ = INVALID_LSN;
     flush_in_progress_ = true;
 
     lock.unlock();
@@ -103,12 +139,21 @@ std::unique_ptr<LogRecord> LogManager::deserialize_log_record(const char *src, i
     std::unique_ptr<LogRecord> record;
     switch (type) {
         case LogType::UPDATE:
+            if (!validate_record_with_table_name(src, total_len, true)) {
+                return nullptr;
+            }
             record = std::make_unique<UpdateLogRecord>();
             break;
         case LogType::INSERT:
+            if (!validate_record_with_table_name(src, total_len, false)) {
+                return nullptr;
+            }
             record = std::make_unique<InsertLogRecord>();
             break;
         case LogType::DELETE:
+            if (!validate_record_with_table_name(src, total_len, false)) {
+                return nullptr;
+            }
             record = std::make_unique<DeleteLogRecord>();
             break;
         case LogType::begin:

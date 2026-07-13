@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -13,8 +14,9 @@
 class AggregateExecutor : public AbstractExecutor {
    private:
     struct AggState {
-        int count = 0;
-        double sum = 0;
+        int64_t row_count = 0;
+        int64_t value_count = 0;
+        long double sum = 0;
         bool has_value = false;
         int int_val = 0;
         float float_val = 0;
@@ -57,10 +59,16 @@ class AggregateExecutor : public AbstractExecutor {
     }
 
     void update_agg(AggState &state, const AggCall &call, const RmRecord &rec) {
-        state.count++;
-        if (call.type == AGG_COUNT) return;
+        state.row_count++;
+        if (call.type == AGG_COUNT && call.is_star) {
+            state.value_count++;
+            return;
+        }
 
         auto meta = find_col(prev_->cols(), call.col);
+        state.value_count++;
+        if (call.type == AGG_COUNT) return;
+
         if (meta->type == TYPE_INT) {
             int v = *(int *)(rec.data + meta->offset);
             state.sum += v;
@@ -89,15 +97,26 @@ class AggregateExecutor : public AbstractExecutor {
         state.has_value = true;
     }
 
+    int clamp_to_int(long double value) const {
+        if (value > std::numeric_limits<int>::max()) {
+            return std::numeric_limits<int>::max();
+        }
+        if (value < std::numeric_limits<int>::min()) {
+            return std::numeric_limits<int>::min();
+        }
+        return static_cast<int>(value);
+    }
+
     Value agg_value(const AggCall &call, const AggState &state) const {
         Value v;
         if (call.type == AGG_COUNT) {
-            v.set_int(state.count);
+            long double count = call.is_star ? state.row_count : state.value_count;
+            v.set_int(clamp_to_int(count));
         } else if (call.type == AGG_AVG) {
-            v.set_float(state.count == 0 ? 0 : (float)(state.sum / state.count));
+            v.set_float(state.value_count == 0 ? 0 : static_cast<float>(state.sum / state.value_count));
         } else if (call.type == AGG_SUM) {
-            if (call.result_type == TYPE_INT) v.set_int((int)state.sum);
-            else v.set_float((float)state.sum);
+            if (call.result_type == TYPE_INT) v.set_int(clamp_to_int(state.sum));
+            else v.set_float(static_cast<float>(state.sum));
         } else if (call.result_type == TYPE_INT) {
             v.set_int(state.has_value ? state.int_val : 0);
         } else if (call.result_type == TYPE_FLOAT) {
@@ -167,7 +186,7 @@ class AggregateExecutor : public AbstractExecutor {
 
     void write_value(RmRecord &rec, int offset, ColType type, int len, const Value &v) {
         if (type == TYPE_INT) {
-            *(int *)(rec.data + offset) = v.type == TYPE_FLOAT ? (int)v.float_val : v.int_val;
+            *(int *)(rec.data + offset) = v.type == TYPE_FLOAT ? clamp_to_int(v.float_val) : v.int_val;
         } else if (type == TYPE_FLOAT) {
             *(float *)(rec.data + offset) = v.type == TYPE_INT ? (float)v.int_val : v.float_val;
         } else {

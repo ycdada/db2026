@@ -10,6 +10,8 @@ See the Mulan PSL v2 for more details. */
 
 #include "buffer_pool_manager.h"
 
+#include "recovery/log_manager.h"
+
 size_t BufferPoolManager::choose_shard_count(size_t pool_size) {
     if (pool_size < 1024) {
         return 1;
@@ -26,6 +28,16 @@ size_t BufferPoolManager::shard_index(PageId page_id) const {
 
 BufferPoolManager::Shard& BufferPoolManager::get_shard(PageId page_id) const {
     return *shards_[shard_index(page_id)];
+}
+
+void BufferPoolManager::flush_page_log(Page *page) {
+    if (log_manager_ == nullptr || page == nullptr) {
+        return;
+    }
+    lsn_t page_lsn = page->get_page_lsn();
+    if (page_lsn != INVALID_LSN) {
+        log_manager_->flush_log_to_disk(page_lsn);
+    }
 }
 
 /**
@@ -65,6 +77,7 @@ void BufferPoolManager::update_page(Shard& shard, Page *page, PageId new_page_id
 
     // 如果是脏页,写回磁盘
     if (page->is_dirty_) {
+        flush_page_log(page);
         disk_manager_->write_page(page->id_.fd, page->id_.page_no, page->data_, PAGE_SIZE);
     }
 
@@ -213,6 +226,7 @@ bool BufferPoolManager::flush_page(PageId page_id) {
     Page* page = &pages_[frame_id];
 
     // 写回磁盘
+    flush_page_log(page);
     disk_manager_->write_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
 
     // 更新dirty标记
@@ -307,6 +321,7 @@ bool BufferPoolManager::delete_page(PageId page_id) {
 
     // 如果是脏页写回磁盘
     if (page->is_dirty_) {
+        flush_page_log(page);
         disk_manager_->write_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
     }
 
@@ -342,6 +357,7 @@ void BufferPoolManager::flush_all_pages(int fd) {
 
             // 获取页面并写回磁盘
             Page* page = &pages_[frame_id];
+            flush_page_log(page);
             disk_manager_->write_page(fd, page_id.page_no, page->data_, PAGE_SIZE);
             page->is_dirty_ = false;
         }

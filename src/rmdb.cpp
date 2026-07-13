@@ -471,6 +471,7 @@ int main(int argc, char **argv) {
         // Open database
         sm_manager->open_db(db_name);
         disk_manager->SetLogFd(disk_manager->open_file(db_name + "/" + LOG_FILE_NAME));
+        buffer_pool_manager->set_log_manager(log_manager.get());
 
         // recovery database
         recovery->analyze();

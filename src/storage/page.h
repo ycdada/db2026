@@ -72,7 +72,10 @@ class Page {
     inline void set_page_lsn(lsn_t page_lsn) { memcpy(get_data() + OFFSET_LSN, &page_lsn, sizeof(lsn_t)); }
 
    private:
-    void reset_memory() { memset(data_, OFFSET_PAGE_START, PAGE_SIZE); }  // 将data_的PAGE_SIZE个字节填充为0
+    void reset_memory() {
+        memset(data_, OFFSET_PAGE_START, PAGE_SIZE);
+        set_page_lsn(INVALID_LSN);
+    }
 
     /** page的唯一标识符 */
     PageId id_;

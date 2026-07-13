@@ -105,6 +105,7 @@ class DeleteExecutor : public AbstractExecutor {
                                     *rec, rid, tab_name_);
                 lsn_t lsn = context_->log_mgr_->add_log_record(&log);
                 context_->txn_->set_prev_lsn(lsn);
+                fh_->set_page_lsn(rid, lsn);
             }
             std::vector<std::pair<IxIndexHandle *, std::vector<char>>> deleted_index_entries;
             try {

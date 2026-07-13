@@ -87,7 +87,7 @@ void RecoveryManager::analyze() {
                 committed_txns_.insert(record->log_tid_);
                 break;
             case LogType::ABORT:
-                active_txns_.erase(record->log_tid_);
+                active_txns_.insert(record->log_tid_);
                 break;
             case LogType::INSERT:
             case LogType::DELETE:
@@ -113,6 +113,22 @@ void RecoveryManager::analyze() {
 bool RecoveryManager::record_exists(RmFileHandle *fh, const Rid &rid) {
     try {
         return fh->is_record(rid);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool RecoveryManager::page_has_log(const std::string &tab_name, const Rid &rid, lsn_t lsn) {
+    auto fh = sm_manager_->fhs_.at(tab_name).get();
+    auto hdr = fh->get_file_hdr();
+    if (rid.page_no < RM_FIRST_RECORD_PAGE || rid.page_no >= hdr.num_pages) {
+        return false;
+    }
+    try {
+        auto page = fh->fetch_page_handle(rid.page_no);
+        lsn_t page_lsn = page.page->get_page_lsn();
+        buffer_pool_manager_->unpin_page(page.page->get_page_id(), false);
+        return page_lsn != INVALID_LSN && page_lsn >= lsn;
     } catch (...) {
         return false;
     }
@@ -194,17 +210,31 @@ void RecoveryManager::apply_redo(LogRecord *record) {
     switch (record->log_type_) {
         case LogType::INSERT: {
             auto *log = static_cast<InsertLogRecord *>(record);
+            if (page_has_log(log->table_name_, log->rid_, record->lsn_)) {
+                break;
+            }
             redo_insert(log->table_name_, log->rid_, log->insert_value_);
+            sm_manager_->fhs_.at(log->table_name_)->set_page_lsn(log->rid_, record->lsn_);
             break;
         }
         case LogType::DELETE: {
             auto *log = static_cast<DeleteLogRecord *>(record);
+            if (page_has_log(log->table_name_, log->rid_, record->lsn_)) {
+                break;
+            }
             redo_delete(log->table_name_, log->rid_, log->delete_value_);
+            if (log->rid_.page_no < sm_manager_->fhs_.at(log->table_name_)->get_file_hdr().num_pages) {
+                sm_manager_->fhs_.at(log->table_name_)->set_page_lsn(log->rid_, record->lsn_);
+            }
             break;
         }
         case LogType::UPDATE: {
             auto *log = static_cast<UpdateLogRecord *>(record);
+            if (page_has_log(log->table_name_, log->rid_, record->lsn_)) {
+                break;
+            }
             redo_update(log->table_name_, log->rid_, log->old_value_, log->new_value_);
+            sm_manager_->fhs_.at(log->table_name_)->set_page_lsn(log->rid_, record->lsn_);
             break;
         }
         default:
@@ -227,17 +257,31 @@ void RecoveryManager::apply_undo(LogRecord *record) {
     switch (record->log_type_) {
         case LogType::INSERT: {
             auto *log = static_cast<InsertLogRecord *>(record);
+            if (!page_has_log(log->table_name_, log->rid_, record->lsn_)) {
+                break;
+            }
             redo_delete(log->table_name_, log->rid_, log->insert_value_);
+            if (log->rid_.page_no < sm_manager_->fhs_.at(log->table_name_)->get_file_hdr().num_pages) {
+                sm_manager_->fhs_.at(log->table_name_)->set_page_lsn(log->rid_, record->lsn_);
+            }
             break;
         }
         case LogType::DELETE: {
             auto *log = static_cast<DeleteLogRecord *>(record);
+            if (!page_has_log(log->table_name_, log->rid_, record->lsn_)) {
+                break;
+            }
             redo_insert(log->table_name_, log->rid_, log->delete_value_);
+            sm_manager_->fhs_.at(log->table_name_)->set_page_lsn(log->rid_, record->lsn_);
             break;
         }
         case LogType::UPDATE: {
             auto *log = static_cast<UpdateLogRecord *>(record);
+            if (!page_has_log(log->table_name_, log->rid_, record->lsn_)) {
+                break;
+            }
             redo_update(log->table_name_, log->rid_, log->new_value_, log->old_value_);
+            sm_manager_->fhs_.at(log->table_name_)->set_page_lsn(log->rid_, record->lsn_);
             break;
         }
         default:

@@ -128,6 +128,8 @@ class RmFileHandle {
 
     void update_record(const Rid &rid, char *buf, Context *context);
 
+    void set_page_lsn(const Rid &rid, lsn_t lsn);
+
     void reset_data_pages();
 
     void reserve_memory_records(size_t count);

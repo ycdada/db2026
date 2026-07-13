@@ -337,6 +337,7 @@ void SmManager::load_table(const std::string& file_name, const std::string& tab_
             log.prev_lsn_ = context->txn_->get_prev_lsn();
             lsn_t lsn = context->log_mgr_->add_log_record(&log);
             context->txn_->set_prev_lsn(lsn);
+            fh->set_page_lsn(rid, lsn);
         }
     };
 

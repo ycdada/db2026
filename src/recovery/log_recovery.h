@@ -43,6 +43,7 @@ private:
     void redo_insert(const std::string &tab_name, const Rid &rid, const RmRecord &record);
     void redo_delete(const std::string &tab_name, const Rid &rid, const RmRecord &record);
     void redo_update(const std::string &tab_name, const Rid &rid, const RmRecord &old_record, const RmRecord &new_record);
+    bool page_has_log(const std::string &tab_name, const Rid &rid, lsn_t lsn);
     void ensure_record_slot(RmFileHandle *fh, const Rid &rid);
     bool record_exists(RmFileHandle *fh, const Rid &rid);
     void insert_indexes(const std::string &tab_name, const RmRecord &record, const Rid &rid);
